@@ -29,8 +29,8 @@ if not os.path.exists(log_dir):
 TRAIN_VOCAB = 'tasks/R2R/data/train_vocab.txt'
 TRAINVAL_VOCAB = 'tasks/R2R/data/trainval_vocab.txt'
 
-IMAGENET_FEATURES = 'img_features/ResNet-152-imagenet.tsv'
-PLACE365_FEATURES = 'img_features/ResNet-152-places365.tsv'
+IMAGENET_FEATURES = '/data/features/ResNet-152-imagenet.tsv'
+PLACE365_FEATURES = '/data/features/ResNet-152-places365.tsv'
 
 if args.features == 'imagenet':
     features = IMAGENET_FEATURES
@@ -389,15 +389,18 @@ def train_val():
     elif args.train == 'speaker':
         train_speaker(train_env, tok, args.iters, val_envs=val_envs)
     elif args.train == 'validspeaker':
-        valid_speaker(tok, val_envs)
+        valid_speaker(train_env, tok, val_envs)
+    elif args.train == 'inferspeaker':
+        unseen_env = R2RBatch(feat_dict, batch_size=args.batchSize, splits=['tasks/R2R/data/aug_paths_test.json'], tokenizer=None)
+        infer_speaker(unseen_env, tok)
     else:
         assert False
 
 
-def valid_speaker(tok, val_envs):
+def valid_speaker(train_env, tok, val_envs):
     import tqdm
-    listner = Seq2SeqAgent(None, "", tok, args.maxAction)
-    speaker = Speaker(None, listner, tok)
+    listner = Seq2SeqAgent(train_env, "", tok, args.maxAction)
+    speaker = Speaker(train_env, listner, tok)
     speaker.load(args.load)
 
     for env_name, (env, evaluator) in val_envs.items():
@@ -408,15 +411,31 @@ def valid_speaker(tok, val_envs):
         path2inst, loss, word_accu, sent_accu = speaker.valid(wrapper=tqdm.tqdm)
         path_id = next(iter(path2inst.keys()))
         print("Inference: ", tok.decode_sentence(path2inst[path_id]))
-        print("GT: ", evaluator.gt[path_id]['instructions'])
-        pathXinst = list(path2inst.items())
-        name2score = evaluator.lang_eval(pathXinst, no_metrics={'METEOR'})
-        score_string = " "
-        for score_name, score in name2score.items():
-            score_string += "%s_%s: %0.4f " % (env_name, score_name, score)
-        print("For env %s" % env_name)
-        print(score_string)
-        print("Average Length %0.4f" % utils.average_length(path2inst))
+        print("GT: ", evaluator.gt[str(path_id)]['instructions'])
+        bleu_score, precisions = evaluator.bleu_score(path2inst)
+
+        print(len(env.data), len(path2inst.keys()))
+        import pdb; pdb.set_trace()
+
+def infer_speaker(env, tok):
+    import tqdm
+    from utils import load_datasets
+    listner = Seq2SeqAgent(env, "", tok, args.maxAction)
+    speaker = Speaker(env, listner, tok)
+    speaker.load(args.load)
+
+    dataset = load_datasets(env.splits)
+    key_map = {}
+    for i, item in enumerate(dataset):
+        key_map[item["path_id"]] = i
+    path2inst = speaker.get_insts(wrapper=tqdm.tqdm)
+    for path_id in path2inst.keys():
+        speaker_pred = tok.decode_sentence(path2inst[path_id])
+        dataset[key_map[path_id]]['instructions'] = [speaker_pred]
+
+    with open("tasks/R2R/data/aug_paths_unseen_infer.json", "w") as f:
+        json.dump(dataset, f, indent=4, sort_keys=True)
+
 
 
 def train_val_augment():
@@ -463,7 +482,7 @@ def train_val_augment():
 
 if __name__ == "__main__":
     if args.train in ['speaker', 'rlspeaker', 'validspeaker',
-                      'listener', 'validlistener']:
+                      'listener', 'validlistener', 'inferspeaker']:
         train_val()
     elif args.train == 'auglistener':
         train_val_augment()
