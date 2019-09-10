@@ -5,13 +5,60 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from param import args
+from weight_inits import weights_init_mlp, xavier_init
 
+class MLP(nn.Module):
+    # hidden_sizes=(128, 128, 128) in SeCTAR
+    def __init__(self, input_dim, output_dim, hidden_sizes=(128, 128),
+                 hidden_act=nn.ReLU, final_act=None, weight_init=xavier_init):
+        super(MLP, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        mlp = nn.Sequential()
+        prev_size = input_dim
+
+        for i, hidden_size in enumerate(hidden_sizes):
+            mlp.add_module(name='linear %d' % i, module=nn.Linear(prev_size, hidden_size))
+            mlp.add_module(name='relu %d' % i, module=hidden_act())
+            prev_size = hidden_size
+
+        mlp.add_module(name='finallayer', module=nn.Linear(hidden_sizes[-1], output_dim))
+
+        if final_act is not None:
+            mlp.add_module(name='finalact', module=final_act())
+
+        self.network = mlp
+
+        self.apply(weight_init)
+
+    def forward(self, x):
+        return self.network(x)
+
+class Parameter(nn.Module):
+    def __init__(self, output_dim, init):
+        super(Parameter, self).__init__()
+        self.output_dim = output_dim
+        self.init = init
+        self.param_init = Variable(np.zeros((1, output_dim)) + init).float()
+        #TODO: fix this nn.Parameter(self.param_init)
+        self.params_var = nn.Parameter(self.param_init) #torch.autograd.Variable(self.param_init, requires_grad=True)
+
+    def parameters(self):
+        return [self.params_var]
+
+    def forward(self, x):
+        batch_size = x.size()[0]
+        return self.params_var.repeat(batch_size, 1) #self.output_dim)
+
+    def reset_weights(self):
+        self.params_var.data.fill_(self.init)
 
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
         attention methods) and a decoder initial state. '''
 
-    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx, 
+    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx,
                             dropout_ratio, bidirectional=False, num_layers=1):
         super(EncoderLSTM, self).__init__()
         self.embedding_size = embedding_size
@@ -24,7 +71,7 @@ class EncoderLSTM(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx)
         input_size = embedding_size
         self.lstm = nn.LSTM(input_size, hidden_size, self.num_layers,
-                            batch_first=True, dropout=dropout_ratio, 
+                            batch_first=True, dropout=dropout_ratio,
                             bidirectional=bidirectional)
         self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
             hidden_size * self.num_directions
@@ -47,7 +94,7 @@ class EncoderLSTM(nn.Module):
         return h0.cuda(), c0.cuda()
 
     def forward(self, inputs, lengths):
-        ''' Expects input vocab indices as (batch, seq_len). Also requires a 
+        ''' Expects input vocab indices as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
         embeds = self.embedding(inputs)  # (batch, seq_len, embedding_size)
         embeds = self.drop(embeds)
@@ -81,7 +128,7 @@ class EncoderLSTM(nn.Module):
 
 
 class SoftDotAttention(nn.Module):
-    '''Soft Dot Attention. 
+    '''Soft Dot Attention.
 
     Ref: http://www.aclweb.org/anthology/D15-1166
     Adapted from PyTorch OPEN NMT.
