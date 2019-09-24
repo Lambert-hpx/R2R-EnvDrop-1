@@ -73,7 +73,7 @@ class BaseAgent(object):
                 if looped:
                     break
 
-class Seq2SeqAgent(BaseAgent):
+class Seq2PolicyAgent(BaseAgent):
     ''' An agent based on an LSTM seq2seq model with attention. '''
 
     # For now, the agent can't pick which forward move to make - just the one in the middle
@@ -89,7 +89,7 @@ class Seq2SeqAgent(BaseAgent):
     }
 
     def __init__(self, env, results_path, tok, episode_len=20):
-        super(Seq2SeqAgent, self).__init__(env, results_path)
+        super(Seq2PolicyAgent, self).__init__(env, results_path)
         self.tok = tok
         self.episode_len = episode_len
         self.feature_size = self.env.feature_size
@@ -98,7 +98,7 @@ class Seq2SeqAgent(BaseAgent):
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
         self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
                                          args.dropout, bidirectional=args.bidir).cuda()
-        self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        self.decoder = model.AttnPolicyLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size, latent_dim=args.vae_latent_dim).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -316,7 +316,9 @@ class Seq2SeqAgent(BaseAgent):
                     for c_id, c in enumerate(ob['candidate']):
                         if c['viewpointId'] in visited[ob_id]:
                             candidate_mask[ob_id][c_id] = 1
-            logit.masked_fill_(candidate_mask, -float('inf'))
+            # logit.masked_fill_(candidate_mask, -float('inf'))
+            logit1 = torch.zeros(candidate_mask.shape).cuda().masked_fill_(candidate_mask, -float('inf')) + logit * (1-candidate_mask.float())
+            logit = logit1
 
             # Supervised training
             target = self._teacher_action(perm_obs, ended)
@@ -332,7 +334,7 @@ class Seq2SeqAgent(BaseAgent):
                 policy_log_probs.append(log_probs.gather(1, a_t.unsqueeze(1)))   # Gather the log_prob for each batch
             elif self.feedback == 'sample':
                 probs = F.softmax(logit, 1)    # sampling an action from model
-                c = torch.distributions.Categorical(probs)
+                c = torch.distributions.Categorical(probs.detach())
                 self.logs['entropy'].append(c.entropy().sum().item())      # For log
                 entropys.append(c.entropy())                                # For optimization
                 a_t = c.sample().detach()
@@ -437,9 +439,11 @@ class Seq2SeqAgent(BaseAgent):
             else:
                 assert args.normalize_loss == 'none'
 
+            self.rl_loss = rl_loss
             self.loss += rl_loss
 
         if train_ml is not None:
+            self.ml_loss = ml_loss
             self.loss += ml_loss * train_ml / batch_size
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
@@ -749,7 +753,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder.eval()
             self.decoder.eval()
             self.critic.eval()
-        super(Seq2SeqAgent, self).test(iters)
+        super(Seq2PolicyAgent, self).test(iters)
 
     def zero_grad(self):
         self.loss = 0.
@@ -782,33 +786,33 @@ class Seq2SeqAgent(BaseAgent):
 
     def train(self, n_iters, feedback='teacher', **kwargs):
         ''' Train for a given number of iterations '''
-        self.feedback = feedback
+        with torch.autograd.set_detect_anomaly(True):
+            self.feedback = feedback
 
-        self.encoder.train()
-        self.decoder.train()
-        self.critic.train()
+            self.encoder.train()
+            self.decoder.train()
+            self.critic.train()
 
-        self.losses = []
-        for iter in range(1, n_iters + 1):
+            self.losses = []
+            for iter in range(1, n_iters + 1):
 
-            self.encoder_optimizer.zero_grad()
-            self.decoder_optimizer.zero_grad()
-            self.critic_optimizer.zero_grad()
+                self.encoder_optimizer.zero_grad()
+                self.decoder_optimizer.zero_grad()
+                self.critic_optimizer.zero_grad()
 
-            self.loss = 0
-            if feedback == 'teacher':
-                self.feedback = 'teacher'
-                self.rollout(train_ml=args.teacher_weight, train_rl=False, **kwargs)
-            elif feedback == 'sample':
-                if args.ml_weight != 0:
+                self.loss = 0
+                if feedback == 'teacher':
                     self.feedback = 'teacher'
-                    self.rollout(train_ml=args.ml_weight, train_rl=False, **kwargs)
-                self.feedback = 'sample'
-                self.rollout(train_ml=None, train_rl=True, **kwargs)
-            else:
-                assert False
-
-            self.loss.backward()
+                    self.rollout(train_ml=args.teacher_weight, train_rl=False, **kwargs)
+                elif feedback == 'sample':
+                    if args.ml_weight != 0:
+                        self.feedback = 'teacher'
+                        self.rollout(train_ml=args.ml_weight, train_rl=False, **kwargs)
+                    self.feedback = 'sample'
+                    self.rollout(train_ml=None, train_rl=True, **kwargs)
+                else:
+                    assert False
+                self.loss.backward()
 
             torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
             torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)

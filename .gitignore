@@ -3,3 +3,10 @@
 *.zip
 /r2r_src/.idea
 /img_features
+build/
+log.txt
+models/
+runs/
+snap.1.0/
+snap/
+tasks/R2R/data/

@@ -15,7 +15,7 @@ class Param:
         # Data preparation
         self.parser.add_argument('--maxInput', type=int, default=80, help="max input instruction")
         self.parser.add_argument('--maxDecode', type=int, default=120, help="max input instruction")
-        self.parser.add_argument('--maxAction', type=int, default=20, help='Max Action sequence')
+        self.parser.add_argument('--maxAction', type=int, default=35, help='Max Action sequence')
         self.parser.add_argument('--batchSize', type=int, default=64)
         self.parser.add_argument('--ignoreid', type=int, default=-100)
         self.parser.add_argument('--feature_size', type=int, default=2048)
@@ -31,7 +31,7 @@ class Param:
 
         # Listener Model Config
         self.parser.add_argument("--zeroInit", dest='zero_init', action='store_const', default=False, const=True)
-        self.parser.add_argument("--mlWeight", dest='ml_weight', type=float, default=0.05)
+        self.parser.add_argument("--mlWeight", dest='ml_weight', type=float, default=0.2)
         self.parser.add_argument("--teacherWeight", dest='teacher_weight', type=float, default=1.)
         self.parser.add_argument("--accumulateGrad", dest='accumulate_grad', action='store_const', default=False, const=True)
         self.parser.add_argument("--features", type=str, default='imagenet')
@@ -72,16 +72,28 @@ class Param:
 
         self.parser.add_argument("--bidir", type=bool, default=True)    # This is not full option
         self.parser.add_argument("--encode", type=str, default="word")  # sub, word, sub_ctx
-        self.parser.add_argument("--subout", dest="sub_out", type=str, default="tanh")  # tanh, max
+        self.parser.add_argument("--subout", dest="sub_out", type=str, default="max")  # tanh, max
         self.parser.add_argument("--attn", type=str, default="soft")    # soft, mono, shift, dis_shift
 
-        self.parser.add_argument("--angleFeatSize", dest="angle_feat_size", type=int, default=4)
+        self.parser.add_argument("--angleFeatSize", dest="angle_feat_size", type=int, default=128)
 
         # A2C
         self.parser.add_argument("--gamma", default=0.9, type=float)
         self.parser.add_argument("--normalize", dest="normalize_loss", default="total", type=str, help='batch or total')
 
+        # VAE
+        self.parser.add_argument("--vae_loss_weight", default=1, type=float)
+        self.parser.add_argument("--vae_kl_weight", default=1, type=float)
+        self.parser.add_argument("--vae_bc_weight", default=1, type=float)
+        self.parser.add_argument("--vae_latent_dim", default=16, type=int)
+        self.parser.add_argument("--view_num", default=36, type=int)
+        self.parser.add_argument("--path_len", default=2, type=int)
+
         self.args = self.parser.parse_args()
+
+        save_path = "snap/%s" % self.args.name
+        os.makedirs(save_path, exist_ok=True)
+        self.args.save_path = save_path
 
         if self.args.optim == 'rms':
             print("Optimizer: Using RMSProp")

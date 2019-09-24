@@ -1,6 +1,7 @@
 
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
@@ -40,7 +41,7 @@ class Parameter(nn.Module):
         super(Parameter, self).__init__()
         self.output_dim = output_dim
         self.init = init
-        self.param_init = Variable(np.zeros((1, output_dim)) + init).float()
+        self.param_init = torch.from_numpy(np.zeros((1, output_dim)) + init).float()
         #TODO: fix this nn.Parameter(self.param_init)
         self.params_var = nn.Parameter(self.param_init) #torch.autograd.Variable(self.param_init, requires_grad=True)
 
@@ -126,6 +127,38 @@ class EncoderLSTM(nn.Module):
             return ctx, decoder_init, c_t  # (batch, seq_len, hidden_size*num_directions)
                                  # (batch, hidden_size)
 
+class SelfAttention(nn.Module):
+    '''
+    Self-Attention for view reducing
+    '''
+    def __init__(self, query_dim, ctx_dim):
+        '''Initialize layer.'''
+        super(SelfAttention, self).__init__()
+        self.linear_k = nn.Linear(query_dim, ctx_dim)
+        self.linear_q = nn.Linear(query_dim, ctx_dim)
+        self.scaling_factor = 1/np.sqrt(ctx_dim)
+        self.sm = nn.Softmax(dim=1)
+
+    def forward(self, h, mask=None,
+                output_tilde=True, output_prob=True):
+        '''Propagate h through the network.
+        h: batch x dim
+        mask: batch x seq_len indices to be masked
+        '''
+        k = self.linear_k(h).unsqueeze(3)  # batch x dim x 1
+        bs, vs, cs, _ = k.size() # batch size, view size, channel size
+        q = self.linear_q(h).unsqueeze(3)  # batch x dim x 1
+        # Get attention
+        k = torch.transpose(k, 2, 3).view(bs*vs, 1, cs)
+        q = q.view(bs*vs, cs, 1)
+        _attn = torch.bmm(k, q).view(bs, vs)
+        if mask is not None:
+            # -Inf masking prior to the softmax
+            _attn.masked_fill_(mask, -float('inf'))
+        attn = self.sm(_attn*self.scaling_factor)    # There will be a bug here, but it's actually a problem in torch source code.
+        # attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
+        weighted_h = torch.bmm(attn.unsqueeze(1), h).squeeze(1)  # batch x dim
+        return weighted_h, attn
 
 class SoftDotAttention(nn.Module):
     '''Soft Dot Attention.
@@ -153,13 +186,13 @@ class SoftDotAttention(nn.Module):
         target = self.linear_in(h).unsqueeze(2)  # batch x dim x 1
 
         # Get attention
-        attn = torch.bmm(context, target).squeeze(2)  # batch x seq_len
-        logit = attn
+        _attn = torch.bmm(context, target).squeeze(2)  # batch x seq_len
+        logit = _attn
 
         if mask is not None:
             # -Inf masking prior to the softmax
-            attn.masked_fill_(mask, -float('inf'))
-        attn = self.sm(attn)    # There will be a bug here, but it's actually a problem in torch source code.
+            _attn.masked_fill_(mask, -float('inf'))
+        attn = self.sm(_attn)    # There will be a bug here, but it's actually a problem in torch source code.
         attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
 
         weighted_context = torch.bmm(attn3, context).squeeze(1)  # batch x dim
@@ -171,6 +204,79 @@ class SoftDotAttention(nn.Module):
             return h_tilde, attn
         else:
             return weighted_context, attn
+
+class AttnPolicyLSTM(nn.Module):
+    ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
+
+    def __init__(self, embedding_size, hidden_size,
+                       dropout_ratio, feature_size=2048+4, latent_dim=64, view_num=args.view_num, path_len=args.path_len):
+        super(AttnPolicyLSTM, self).__init__()
+        self.embedding_size = embedding_size
+        self.feature_size = feature_size
+        self.hidden_size = hidden_size
+        self.embedding = nn.Sequential(
+            nn.Linear(args.angle_feat_size, self.embedding_size),
+            nn.Tanh()
+        )
+        self.drop = nn.Dropout(p=dropout_ratio)
+        self.drop_env = nn.Dropout(p=args.featdropout)
+        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
+        self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.fc1 = nn.Linear(hidden_size, latent_dim)
+        # self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        from vae import PolicyDecoder
+        self.policy = PolicyDecoder(feature_size, latent_dim, view_num, path_len)
+
+    def forward(self, action, feature, cand_feat,
+                h_0, prev_h1, c_0,
+                ctx, ctx_mask=None,
+                already_dropfeat=False):
+        '''
+        Takes a single step in the decoder LSTM (allowing sampling).
+        action: batch x angle_feat_size
+        feature: batch x 36 x (feature_size + angle_feat_size)
+        cand_feat: batch x cand x (feature_size + angle_feat_size)
+        h_0: batch x hidden_size
+        prev_h1: batch x hidden_size
+        c_0: batch x hidden_size
+        ctx: batch x seq_len x dim
+        ctx_mask: batch x seq_len - indices to be masked
+        already_dropfeat: used in EnvDrop
+        '''
+        action_embeds = self.embedding(action)
+
+        # Adding Dropout
+        action_embeds = self.drop(action_embeds)
+
+        if not already_dropfeat:
+            # Dropout the raw feature as a common regularization
+            feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
+
+        prev_h1_drop = self.drop(prev_h1)
+        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
+
+        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+
+        h_1_drop = self.drop(h_1)
+        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+        z = self.fc1(h_tilde)
+
+        # Adding Dropout
+        # h_tilde_drop = self.drop(h_tilde) # TODO: ablation droprate of z
+
+        if not already_dropfeat:
+            cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
+
+        # _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
+        feature = feature.unsqueeze(1)
+        cand_feat = cand_feat.unsqueeze(1)
+        # action_dist = self.policy(z, feature, cand_feat)
+        # logit = action_dist.prob
+        logit = self.policy(z, feature, cand_feat)
+
+        return h_1, c_1, logit, h_tilde
 
 
 class AttnDecoderLSTM(nn.Module):
@@ -225,6 +331,7 @@ class AttnDecoderLSTM(nn.Module):
         h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
 
         h_1_drop = self.drop(h_1)
+        import pdb; pdb.set_trace()
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
 
         # Adding Dropout

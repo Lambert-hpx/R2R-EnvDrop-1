@@ -12,8 +12,10 @@ from utils import read_vocab,write_vocab,build_vocab,Tokenizer,padding_idx,timeS
 import utils
 from env import R2RBatch
 from agent import Seq2SeqAgent
+from vae_agent import Seq2PolicyAgent
 from eval import Evaluation
 from param import args
+from vae import BaseVAE
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -98,6 +100,119 @@ def train_speaker(train_env, tok, n_iters, log_every=500, val_envs={}):
             # Screen print out
             print("Bleu 1: %0.4f Bleu 2: %0.4f, Bleu 3 :%0.4f,  Bleu 4: %0.4f" % tuple(precisions))
 
+def train_vae_agent(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
+    writer = SummaryWriter(logdir=log_dir)
+    listner = Seq2PolicyAgent(train_env, "", tok, args.maxAction)
+    # listner = Seq2SeqAgent(train_env, "", tok, args.maxAction)
+
+    speaker = None
+    if args.self_train:
+        speaker = Speaker(train_env, listner, tok)
+        if args.speaker is not None:
+            print("Load the speaker from %s." % args.speaker)
+            speaker.load(args.speaker)
+
+    start_iter = 0
+    if args.load is not None:
+        print("LOAD THE listener from %s" % args.load)
+        start_iter = listner.load(os.path.join(args.load))
+
+    start = time.time()
+
+    best_val = {'val_seen': {"accu": 0., "state":"", 'update':False},
+                'val_unseen': {"accu": 0., "state":"", 'update':False}}
+    if args.fast_train:
+        log_every = 40
+    for idx in range(start_iter, start_iter+n_iters, log_every):
+        listner.logs = defaultdict(list)
+        interval = min(log_every, n_iters-idx)
+        iter = idx + interval
+
+        # Train for log_every interval
+        if aug_env is None:     # The default training process
+            listner.env = train_env
+            listner.train(interval, feedback=feedback_method)   # Train interval iters
+        else:
+            if args.accumulate_grad:
+                for _ in range(interval // 2):
+                    listner.zero_grad()
+                    listner.env = train_env
+
+                    # Train with GT data
+                    args.ml_weight = 0.2
+                    listner.accumulate_gradient(feedback_method)
+                    listner.env = aug_env
+
+                    # Train with Back Translation
+                    args.ml_weight = 0.6        # Sem-Configuration
+                    listner.accumulate_gradient(feedback_method, speaker=speaker)
+                    listner.optim_step()
+            else:
+                for _ in range(interval // 2):
+                    # Train with GT data
+                    listner.env = train_env
+                    args.ml_weight = 0.2
+                    listner.train(1, feedback=feedback_method)
+
+                    # Train with Back Translation
+                    listner.env = aug_env
+                    args.ml_weight = 0.6
+                    listner.train(1, feedback=feedback_method, speaker=speaker)
+
+        # Log the training stats to tensorboard
+        total = max(sum(listner.logs['total']), 1)
+        length = max(len(listner.logs['critic_loss']), 1)
+        critic_loss = sum(listner.logs['critic_loss']) / total #/ length / args.batchSize
+        entropy = sum(listner.logs['entropy']) / total #/ length / args.batchSize
+        predict_loss = sum(listner.logs['us_loss']) / max(len(listner.logs['us_loss']), 1)
+        writer.add_scalar("loss/critic", critic_loss, idx)
+        writer.add_scalar("policy_entropy", entropy, idx)
+        writer.add_scalar("loss/unsupervised", predict_loss, idx)
+        writer.add_scalar("total_actions", total, idx)
+        writer.add_scalar("max_length", length, idx)
+        print("total_actions", total)
+        print("max_length", length)
+
+        # Run validation
+        loss_str = ""
+        for env_name, (env, evaluator) in val_envs.items():
+            listner.env = env
+
+            # Get validation loss under the same conditions as training
+            iters = None if args.fast_train or env_name != 'train' else 20     # 20 * 64 = 1280
+
+            # Get validation distance from goal under test evaluation conditions
+            listner.test(use_dropout=False, feedback='argmax', iters=iters)
+            result = listner.get_results()
+            score_summary, _ = evaluator.score(result)
+            loss_str += ", %s " % env_name
+            for metric,val in score_summary.items():
+                if metric in ['success_rate']:
+                    writer.add_scalar("accuracy/%s" % env_name, val, idx)
+                    if env_name in best_val:
+                        if val > best_val[env_name]['accu']:
+                            best_val[env_name]['accu'] = val
+                            best_val[env_name]['update'] = True
+                loss_str += ', %s: %.3f' % (metric, val)
+
+        for env_name in best_val:
+            if best_val[env_name]['update']:
+                best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
+                best_val[env_name]['update'] = False
+                listner.save(idx, os.path.join("snap", args.name, "state_dict", "best_%s" % (env_name)))
+
+        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
+                                             iter, float(iter)/n_iters*100, loss_str)))
+
+        if iter % 1000 == 0:
+            print("BEST RESULT TILL NOW")
+            for env_name in best_val:
+                print(env_name, best_val[env_name]['state'])
+
+        if iter % 50000 == 0:
+            listner.save(idx, os.path.join("snap", args.name, "state_dict", "Iter_%06d" % (iter)))
+
+    listner.save(idx, os.path.join("snap", args.name, "state_dict", "LAST_iter%d" % (idx)))
 
 def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
     writer = SummaryWriter(logdir=log_dir)
@@ -381,6 +496,8 @@ def train_val():
 
     if args.train == 'listener':
         train(train_env, tok, args.iters, val_envs=val_envs)
+    elif args.train == 'vae_agent':
+        train_vae_agent(train_env, tok, args.iters, val_envs=val_envs)
     elif args.train == 'validlistener':
         if args.beam:
             beam_valid(train_env, tok, val_envs=val_envs)
@@ -395,6 +512,23 @@ def train_val():
         infer_speaker(unseen_env, tok)
     else:
         assert False
+
+def train_vae():
+    """Train vae for sub-policy(z->policy)"""
+    setup()
+    vocab = read_vocab(TRAIN_VOCAB)
+    tok = Tokenizer(vocab=vocab, encoding_length=args.maxInput)
+    feat_dict = read_img_features(features)
+    featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
+    # Create a batch training environment that will also preprocess text
+    train_env = R2RBatch(feat_dict, batch_size=args.batchSize, splits=['sub_train'],tokenizer=tok)
+    writer = SummaryWriter(logdir=log_dir)
+
+    obs_dim = train_env.feature_size+args.angle_feat_size
+    # TODO: latent_dim ablation
+    path_len = 2 # fix path_len = 2, total path_len = 6
+    vae = BaseVAE(train_env, tok, obs_dim, args.vae_latent_dim).cuda()
+    vae.train()
 
 
 def valid_speaker(train_env, tok, val_envs):
@@ -482,10 +616,13 @@ def train_val_augment():
 
 if __name__ == "__main__":
     if args.train in ['speaker', 'rlspeaker', 'validspeaker',
-                      'listener', 'validlistener', 'inferspeaker']:
+                      'listener', 'validlistener', 'inferspeaker',
+                      'vae_agent']:
         train_val()
     elif args.train == 'auglistener':
         train_val_augment()
+    elif args.train == 'vae':
+        train_vae()
     else:
         assert False
 

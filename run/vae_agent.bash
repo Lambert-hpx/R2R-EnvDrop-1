@@ -1,5 +1,5 @@
-name=agent
-flag="--attn soft --train listener 
+name=vae_agent
+flag="--attn soft --train vae_agent
       --featdropout 0.3
       --angleFeatSize 128
       --feedback sample

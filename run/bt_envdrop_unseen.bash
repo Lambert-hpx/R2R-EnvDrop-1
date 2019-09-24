@@ -1,11 +1,11 @@
-name=agent_bt.0.4
+name=agent_bt_test.0.4
 # aug: the augmented paths, only the paths are used (not the insts)
 # speaker: load the speaker from
 # load: load the agent from
 flag="--attn soft --train auglistener --selfTrain
-      --aug tasks/R2R/data/aug_paths.json
+      --aug tasks/R2R/data/aug_paths_unseen_infer.json
       --speaker snap/speaker/state_dict/best_val_unseen_bleu 
-      --load snap/agent/state_dict/best_val_unseen
+      --load snap/agent_bt/state_dict/best_val_unseen
       --angleFeatSize 128
       --accumulateGrad
       --featdropout 0.4

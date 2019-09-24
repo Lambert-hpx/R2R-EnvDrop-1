@@ -1,14 +1,18 @@
 import torch
 import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-
+import torch.nn as nn
+from torch.autograd import Variable
+from torch.utils.tensorboard import SummaryWriter
 
 from param import args
 from speaker import Speaker
 from agent import Seq2SeqAgent
 import model
-from distribution import Normal
+from distribution import Normal,Categorical
+import utils
 
+writer = SummaryWriter(log_dir=args.save_path+"/log")
 
 # following the Experimental Details in SeCTER
 class StateEncoder(nn.Module):
@@ -17,52 +21,41 @@ class StateEncoder(nn.Module):
     The encoder is a two-layer bidirectional-LSTM with 300 hidden units
     We mean-pool over LSTM outputs over time before a linear transformation
     '''
-    def __init__(self, latent_dim, hidden_dim=300, bidirectional=True, num_layers=2, min_var=1e-4):
+    def __init__(self, obs_dim, latent_dim, hidden_dim=600, bidirectional=True, num_layers=2, min_var=1e-4, dropout_ratio=args.dropout):
+        super(StateEncoder, self).__init__()
+        self.obs_dim = obs_dim
+        self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
         if bidirectional:
             print("Using Bidir in EncoderLSTM")
         self.num_directions = 2 if bidirectional else 1
         self.num_layers = num_layers
-        input_size = embedding_size
-        self.lstm = nn.LSTM(input_size, hidden_size, self.num_layers,
-                            batch_first=True, dropout=dropout_ratio,
-                            bidirectional=bidirectional)
-        self.mean_network = model.MLP(2*hidden_dim, latent_dim)
-        self.log_var_network = model.MLP(2*hidden_dim, latent_dim)
-        self.min_log_var = Variable(np.log(np.array([min_var])).astype(np.float32))
+        self.lstm = nn.LSTM(obs_dim, hidden_dim // self.num_directions, self.num_layers, batch_first=True, dropout=dropout_ratio, bidirectional=bidirectional)
+        self.attention_layer = model.SoftDotAttention(hidden_dim, obs_dim)
+        self.post_lstm = nn.LSTM(hidden_dim, hidden_dim // self.num_directions, self.num_layers, batch_first=True, dropout=dropout_ratio, bidirectional=bidirectional)
+        self.mean_network = model.MLP(hidden_dim, latent_dim)
+        self.log_var_network = model.MLP(hidden_dim, latent_dim)
+        # self.min_log_var = Variable(np.log(np.array([min_var])).astype(np.float32))
+        self.min_log_var = torch.from_numpy(np.log(np.array([min_var])).astype(np.float32)).cuda()
 
-    def init_state(self, inputs):
-        ''' Initialize to zero cell states and hidden states.'''
-        batch_size = inputs.size(0)
-        h0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
-        c0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
-
-        return h0.cuda(), c0.cuda()
-
-    def forward(self, inputs, lengths):
+    def forward(self, action_embeds, feature, lengths):
         ''' Expects input state sequence as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
-        h0, c0 = self.init_state(inputs)
-        packed_embeds = pack_padded_sequence(inputs, lengths, batch_first=True)
-        enc_h, (enc_h_t, enc_c_t) = self.lstm(packed_embeds, (h0, c0))
-        # if self.num_directions == 2:    # The size of enc_h_t is (num_layers * num_directions, batch, hidden_size)
-        #     h_t = torch.cat((enc_h_t[-1], enc_h_t[-2]), 1)
-        #     c_t = torch.cat((enc_c_t[-1], enc_c_t[-2]), 1)
-        # else:
-        #     h_t = enc_h_t[-1]
-        #     c_t = enc_c_t[-1] # (batch, hidden_size)
-        ctx, _ = pad_packed_sequence(enc_h, batch_first=True)
-        # mean pooling
-        ctx_mean = torch.mean(ctx, dim=1)
-        mean, log_var = self.mean_network(ctx_mean), self.log_var_network(ctx_mean)
+        x = action_embeds
+        ctx, _ = self.lstm(x)
+        # Att and Handle with the shape
+        batch_size, max_length, _ = ctx.size()
+        x, _ = self.attention_layer(                        # Attend to the feature map
+            ctx.contiguous().view(-1, self.hidden_dim),    # (batch, length, hidden) --> (batch x length, hidden)
+            feature.view(batch_size * max_length, -1, self.obs_dim),        # (batch, length, # of images, obs_dim) --> (batch x length, # of images, obs_dim)
+        )
+        x = x.view(batch_size, max_length, -1)
+        # Post LSTM layer
+        x, _ = self.post_lstm(x)
+
+        # need mean pooling for path_len
+        x = torch.mean(x, dim=1)
+        mean, log_var = self.mean_network(x), self.log_var_network(x)
         log_var = torch.max(self.min_log_var, log_var)
         dist = Normal(mean=mean, log_var=log_var)
         return dist
@@ -74,64 +67,70 @@ class StateDecoder(nn.Module):
     '''
     # TODO: trajectories length T=19, plan over K=2048
     # random latent sequences. horizon H = 380/950 ?
-    def __init__(self, obs_dim, latent_dim, path_len, hidden_dim=256, bidirectional=False, num_layers=1):
+    # Here obs_dim=2048+128(geo_feat_size)
+    def __init__(self, obs_dim, latent_dim, view_num, path_len=2, hidden_dim=256, bidirectional=False, num_layers=1, dropout_ratio=args.dropout):
+        super(StateDecoder, self).__init__()
         self.obs_dim = obs_dim
         self.latent_dim = latent_dim
         self.path_len = path_len
         self.hidden_dim = hidden_dim
         self.num_directions = 2 if bidirectional else 1
         self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, self.num_layers,
+        self.view_num = view_num
+        self.view_atten = model.SelfAttention(obs_dim+latent_dim, hidden_dim)
+        self.fc1 = nn.Linear(obs_dim+latent_dim, hidden_dim)
+        self.relu1 = nn.LeakyReLU()
+        self.h_size = 1
+        if bidirectional:
+            self.h_size += 1
+        self.h_size *= num_layers
+        self.lstm = nn.LSTM(hidden_dim, hidden_dim, num_layers,
                 batch_first=True, dropout=dropout_ratio,
                 bidirectional=bidirectional)
-        self.mean_network = model.MLP(hidden_dim, obs_dim)
-        self.log_var_network = model.Parameter(obs_dim, init=np.log(0.1))
+        self.mean_network = model.MLP(hidden_dim, obs_dim*view_num)
+        self.log_var_network = model.Parameter(obs_dim*view_num, init=np.log(0.1))
 
-    def init_state(self, inputs):
-        ''' Initialize to zero cell states and hidden states.'''
-        batch_size = inputs.size(0)
-        h0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
-        c0 = Variable(torch.zeros(
-            self.num_layers * self.num_directions,
-            batch_size,
-            self.hidden_size
-        ), requires_grad=False)
-
-        return h0.cuda(), c0.cuda()
+    def init_state(self, bs):
+        '''Initialize to zero cell states and hidden states.'''
+        self.hidden = (Variable(torch.zeros(self.h_size, bs, self.hidden_dim).cuda()),
+                       Variable(torch.zeros(self.h_size, bs, self.hidden_dim)).cuda())
+        self.lengths = Variable(torch.ones(bs)).cuda()
 
     def step(self, x):
-        # Torch uses (path_len, bs, input_dim) for recurrent input
-        # Return (1, bs, output_dim)
-        assert x.size()[0] == 1, "Path len must be 1"
-        out = self.lstm(x).squeeze(0)
-        mean, log_var = self.mean_network(out), self.log_var_network(out)
-        #log_var = torch.max(self.min_log_var, log_var)
-        return mean.unsqueeze(0), log_var.unsqueeze(0)
+        # Torch uses (bs, 1, latent_dim) for recurrent input
+        # Return (bs, 1, obs_dim)
+        assert len(x.size())==3, "Input shape must be (bs, 1, latent_dim)"
+        assert x.size()[1] == 1, "Path len must be 1"
+        seq_x = pack_padded_sequence(x, self.lengths, batch_first=True)
+        packed_output, self.hidden = self.lstm(seq_x, self.hidden)
+        output, input_sizes = pad_packed_sequence(packed_output, batch_first=True)
+        mean, log_var = self.mean_network(output), self.log_var_network(output)
+        return mean.squeeze(1), log_var.squeeze(1)
 
     def forward(self, z, s0):
         '''
         z: (bs, input_dim)
-        s0: initial obs (bs, obs_dim)
+        s0: initial obs (bs, view_dim, obs_dim) # view_dim = 36
         '''
-        h0, c0 = self.init_state(z)
-        packed_embeds = pack_padded_sequence(z, lengths, batch_first=True)
+        bs = z.size()[0]
+        self.init_state(bs)
         if s0 is None:
-            s0 = Variable(torch.zeros(bs, self.output_dim)) # init input
-        z = z.unsqueeze(0) # (1, bs, latent_dim)
-        s0 = s0.unsqueeze(0) # (1, bs, obs_dim)
+            s0 = Variable(torch.zeros(bs, self.obs_dim)) # init input
+        (bs, view_dim, obs_dim) = s0.shape
+        z = z.unsqueeze(1).repeat(1, view_dim, 1) # (bs, view_dim, latent_dim)
         means, log_vars = [], []
         x = s0
+        # NOTE: decode states by step 1 since we have fixed start point s0
         for i in range(self.path_len):
-            x = torch.cat([x, z], -1)
+            # TODO: layernorm instead of concat: x=LayerNorm(A x) + LayerNorm(B z)
+            x = torch.cat([x, z], -1) # TODO: balance energy between x,z
+            x, attn = self.view_atten(x)
+            x = self.relu1(self.fc1(x)) # TODO: relu is necessary or not ?
+            x = x.unsqueeze(1) # bs, len, dim
             mean, log_var = self.step(x)
-            x = mean
-            #x = Variable(torch.randn(mean.size())) * torch.exp(log_var) + mean
-            means.append(mean.squeeze(dim=0))
-            log_vars.append(log_var.squeeze(dim=0))
+            x = mean.view(bs, self.view_num, -1)
+            means.append(mean)
+            log_vars.append(log_var)
         means = torch.stack(means, 1).view(bs, -1)
         log_vars = torch.stack(log_vars, 1).view(bs, -1)
         dist = Normal(means, log_var=log_vars)
@@ -140,30 +139,76 @@ class StateDecoder(nn.Module):
 class PolicyDecoder(nn.Module):
     '''Single MLP predict action by (z, state)'''
     # TODO: auto encoder for compress observation
-    def __init__(self, obs_dim, latent_dim, action_dim)
-        self.policy_network = MLP(obs_dim+latent_dim, action_dim,
-            hidden_sizes=(400, 300, 200), hidden_act=nn.ReLU, final_act=nn.Softmax)
-        self.action_dim = action_dim
+    def __init__(self, obs_dim, latent_dim, view_dim, path_len, hidden_dim=256):
+        super(PolicyDecoder, self).__init__()
+        self.obs_dim = obs_dim
+        self.latent_dim = latent_dim
+        self.view_dim = view_dim
+        self.path_len = path_len
+        self.view_atten = model.SelfAttention(obs_dim+latent_dim, hidden_dim)
+        self.fc1 = nn.Linear(obs_dim+latent_dim, hidden_dim)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(obs_dim, hidden_dim)
+        self.relu2 = nn.LeakyReLU()
+        self.pred_layer = model.SoftDotAttention(hidden_dim, hidden_dim)
 
-    def forward(self, x):
-        prob = self.prob_network(x)
+    def forward(self, z, img_feats, candidate_feats, candidate_masks=None):
+        # import pdb; pdb.set_trace()
+        (bs, path_len, view_dim, obs_dim) = img_feats.size()
+        x = img_feats.view(-1, view_dim, obs_dim)
+        z = z.unsqueeze(1).unsqueeze(1).repeat(1, path_len, view_dim, 1).view(bs*path_len, view_dim, -1) # (bs*path_len, view_dim, latent_dim)
+        x = torch.cat([x, z], -1) # TODO: balance energy between x,z
+        x, attn = self.view_atten(x) # (bs*path_len, hidden_dim)
+        x = self.relu1(self.fc1(x))
+        (bs, path_len, candidate_num, obs_dim) = candidate_feats.size()
+        candidate_feats = candidate_feats.view(bs*path_len, candidate_num, obs_dim)
+        candidate_feats = self.relu2(self.fc2(candidate_feats))
+        if candidate_masks is not None:
+            candidate_masks = candidate_masks.view(bs*path_len, candidate_num)
+        # _, logit = self.pred_layer(x, candidate_feats, mask=candidate_masks, output_prob=False) # output logit rather than prob
+        _, prob = self.pred_layer(x, candidate_feats, mask=candidate_masks)
         dist = Categorical(prob)
-        return dist
+        # return dist
+        return prob
 
-class BaseVAE():
-    def __init__(self, obs_dim, latent_dim, path_len, action_dim, lr):
-        self.obs_dim
-        self.latent_dim
-        self.path_len
-        self.action_dim
-        self.encoder = StateEncoder(latent_dim)
-        self.decoder = StateDecoder(obs_dim, latent_dim, path_len)
-        self.policy = PolicyDecoder(obs_dim, latent_dim, action_dim)
+class BaseVAE(nn.Module):
+    env_actions = {
+        'left': (0,-1, 0), # left
+        'right': (0, 1, 0), # right
+        'up': (0, 0, 1), # up
+        'down': (0, 0,-1), # down
+        'forward': (1, 0, 0), # forward
+        '<end>': (0, 0, 0), # <end>
+        '<start>': (0, 0, 0), # <start>
+        '<ignore>': (0, 0, 0)  # <ignore>
+    }
+    def __init__(self, env, tok, obs_dim, latent_dim, loss_type="mse", view_num=args.view_num, path_len=2):
+        super(BaseVAE, self).__init__()
+        self.env = env
+        self.tok = tok
+        self.obs_dim = obs_dim
+        self.latent_dim = latent_dim
+        self.path_len = path_len
+        self.view_num = view_num
+        self.loss_type=loss_type
+        self.encoder = StateEncoder(obs_dim, latent_dim)
+        self.decoder = StateDecoder(obs_dim, latent_dim, view_num, path_len=path_len)
+        self.policy = PolicyDecoder(obs_dim, latent_dim, view_num, path_len)
+        self.unit_n = Normal(Variable(torch.zeros(1, latent_dim)).cuda(),
+                             log_var=Variable(torch.zeros(1, latent_dim)).cuda())
         self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
         self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
         self.policy_optimizer = args.optimizer(self.policy.parameters(), lr=args.lr)
+        self.vae_loss_weight = args.vae_loss_weight
+        self.vae_kl_weight = args.vae_kl_weight
+        # self.bc_weight = 100
+        self.vae_bc_weight = args.vae_bc_weight
+        self.iter = None # training iteration indicator
 
-    def forward(self, batch_state, batch_act, train=True):
+    def forward(self, train=True):
+        """
+        train state-decoder with
+        """
         if train:
             self.encoder.train()
             self.decoder.train()
@@ -174,67 +219,51 @@ class BaseVAE():
             self.policy.eval()
         obs = self.env._get_obs()
         batch_size = len(obs)
-        (img_feats, can_feats), lengths = self.from_shortest_path()
-
-        x = batch_state
-        z_dist = self.encode(Variable(x))
+        (img_feats, can_feats, teacher_actions, candidate_feats, candidate_masks), lengths = self.from_shortest_path()
+        # check mask for all non-zero values
+        assert bool((torch.sum(candidate_feats*candidate_masks.unsqueeze(3).repeat(1,1,1,2176).float())==0).cpu().numpy())
+        z_dist = self.encoder(can_feats, img_feats, lengths)
+        h_t = torch.zeros(1, batch_size, args.rnn_dim).cuda()
+        c_t = torch.zeros(1, batch_size, args.rnn_dim).cuda()
         z = z_dist.sample()
-        y_dist = self.decode(x, z)
-        # y = x[:, self.step_dim:].contiguous() # TODO: what is x[:, self.step_dim:]
-        # TODO: debug reshape
-        import pdb; pdb.set_trace()
-        xview = x.view((x.size()[0], -1, self.obs_dim)).clone()
-        zexpand = z.unsqueeze(1).expand(*xview.size()[:2], z.size()[-1])
-        xz = torch.cat(( Variable(xview), zexpand), -1)
-        xz_view = xz.view((-1, xz.size()[-1]))
-        dist = self.policy.forward(xz_view)
-        act_view = batch_act.view((-1, self.action_dim))
-        bcloss = -dist.log_likelihood(Variable(act_view))
-
-        mse = torch.pow(y_dist.mle - x, 2).mean(-1)
-        neg_ll = - y_dist.log_likelihood(x) / self.decoder.path_len
-        kl = z_dist.kl(self.unit_n)
-        return mse, neg_ll, kl, bcloss, z_dist
-
-    def forward(self):
-        if train:
-            self.encoder.train()
-            self.decoder.train()
-            self.policy.train()
+        s0 = img_feats[:,0,:,:] # init s0
+        # forward state decoder
+        state_dist = self.decoder.forward(z, s0.detach())
+        # forward policy decoder
+        # NOTE: don't predict last action(use STOP as label may misleading)
+        action_dist = self.policy.forward(z, img_feats[:,:-1,:,:].contiguous(), candidate_feats[:,:-1,:,:].contiguous(), candidate_masks[:,:-1,:].contiguous()) # dist shape(bs*path_len, num_classes)
+        # compute loss
+        y_state = img_feats[:,1:,:,:].view(batch_size,-1) # gt for state decoder
+        # behavior clone loss
+        y_action = teacher_actions[:,:-1,:].contiguous().view(batch_size*self.path_len, -1)
+        bcloss = self.vae_bc_weight * torch.sum(-action_dist.log_likelihood(y_action.float()))
+        # mse loss for state decoder
+        mse = self.vae_loss_weight * torch.sum(torch.pow(state_dist.mle - y_state, 2).mean(-1))
+        neg_ll = self.vae_loss_weight * torch.sum(-state_dist.log_likelihood(y_state) / self.path_len)
+        kl = self.vae_kl_weight * torch.sum(z_dist.kl(self.unit_n))
+        # print(bcloss, mse, neg_ll, kl)
+        writer.add_scalar('Loss/bcloss', bcloss.detach().cpu().numpy(), self.iter)
+        writer.add_scalar('Loss/mse', mse.detach().cpu().numpy(), self.iter)
+        writer.add_scalar('Loss/kl', kl.detach().cpu().numpy(), self.iter)
+        if self.loss_type == 'mse':
+            loss =  mse + kl + bcloss
+        elif self.loss_type=="ll":
+            loss =  neg_ll + kl + bcloss
         else:
-            self.encoder.eval()
-            self.decoder.eval()
-            self.policy.eval()
+            raise Exception("loss type undefined")
+        # return mse, neg_ll, kl, bcloss, z_dist
+        return loss
 
-        obs = self.env._get_obs()
-        batch_size = len(obs)
-        (img_feats, can_feats), lengths = self.from_shortest_path()
-
-
-    def encode(self, x):
-        # TODO: debug reshape
-        x = x.view((x.size()[0], -1, self.obs_dim)).clone()
-        x = x.transpose(0, 1)
-        return self.encoder.forward(x)
-
-    def decode(self, x, z):
-        if self.decoder.recurrent():
-            # initial_input = x[:, :self.obs_dim].contiguous().clone()
-            initial_input = x.clone()
-            output = self.decoder.forward(z, initial_input=Variable(initial_input))
-            return output
-        else:
-            return self.decoder.forward(z)
-
-    def train(self, dataset, tok, test_dataset=None, max_epochs=10000, save_step=1000, print_step=1, plot_step=1, record_stats=False):
+    def train(self, test_dataset=None, max_iter=args.iters, save_step=1000, print_step=1, plot_step=1, record_stats=False):
         # speaker = Speaker(train_env, listner, tok)
         # listner = Seq2SeqAgent(train_env, "", tok, args.maxAction)
         # TODO: train a VAE for state-state&inst-inst
-        # TODO: train a policy decoder
+        # TODO: train a policy decoder, RL
         if args.speaker is not None:
             print("Load the speaker from %s." % args.speaker)
             speaker.load(args.speaker)
-        for epoch in range(1, max_epochs + 1):
+        for _iter in range(1, max_iter + 1):
+            self.iter = _iter
             self.env.reset()
             self.encoder_optimizer.zero_grad()
             self.decoder_optimizer.zero_grad()
@@ -246,47 +275,24 @@ class BaseVAE():
             torch.nn.utils.clip_grad_norm(self.policy.parameters(), 40.)
             self.encoder_optimizer.step()
             self.decoder_optimizer.step()
-            self.policy.step()
-            # stats = self.train_epoch(dataset, epoch)
-            # test = self.train_epoch(test_dataset, epoch, train=False)
-            # for k, v in test.items():
-            #     stats['V ' + k] = v
-            # stats['Test RL'] = self.test_pd(test_dataset)
+            self.policy_optimizer.step()
 
-            # if epoch % print_step == 0:
-            #     with logger.prefix('itr #%d | ' % epoch):
-            #         self.print_diagnostics(stats)
+            if _iter % save_step == 0:
+                print("Save models at iter %d" % _iter)
+                self.save(_iter)
+            # TODO: test every epoch
 
-            # if epoch % plot_step == 0:
-            #     self.plot_compare(dataset, epoch)
-            #     self.plot_interp(dataset, epoch)
-            #     self.plot_compare(test_dataset, epoch, save_dir='test')
-            #     self.plot_random(dataset, epoch)
+        return
 
-            # if epoch % save_step == 0 and logger.get_snapshot_dir() is not None:
-            #     self.save(logger.get_snapshot_dir() + '/snapshots/', epoch)
+    def save(self, itr):
+        torch.save(self.encoder.state_dict(), args.save_path + '/encoder_%d.pkl' %itr)
+        torch.save(self.decoder.state_dict(), args.save_path + '/decoder_%d.pkl' % itr)
+        torch.save(self.policy.state_dict(), args.save_path + '/policy_%d.pkl' %itr)
 
-            # if record_stats:
-            #     with logger.prefix('itr #%d | ' % epoch):
-            #         self.log_diagnostics(stats)
-            #         logger.dump_tabular()
-
-        return stats
-
-
-
-    def save(self, snapshot_dir, itr):
-        import os
-        if not os.path.exists(snapshot_dir):
-            os.makedirs(snapshot_dir)
-        torch.save(self.encoder.state_dict_lst(), snapshot_dir + '/encoder_%d.pkl' %itr)
-        torch.save(self.policy.state_dict_lst(), snapshot_dir + '/policy_%d.pkl' %itr)
-        torch.save(self.decoder.state_dict_lst(), snapshot_dir + '/decoder_%d.pkl' % itr)
-
-    def load(self, snapshot_dir, itr):
-        self.policy.load_state_dict(torch.load(snapshot_dir + '/policy_%d.pkl' %itr))
-        self.encoder.load_state_dict(torch.load(snapshot_dir + '/encoder_%d.pkl' %itr))
-        self.decoder.load_state_dict(torch.load(snapshot_dir + '/decoder_%d.pkl' % itr))
+    def load(self, itr):
+        self.encoder.load_state_dict(torch.load(args.save_path + '/encoder_%d.pkl' %itr))
+        self.decoder.load_state_dict(torch.load(args.save_path + '/decoder_%d.pkl' %itr))
+        self.policy.load_state_dict(torch.load(args.save_path + '/policy_%d.pkl' %itr))
 
     def from_shortest_path(self, viewpoints=None, get_first_feat=False):
         """
@@ -299,7 +305,11 @@ class BaseVAE():
         length = np.zeros(len(obs), np.int64)
         img_feats = []
         can_feats = []
-        first_feat = np.zeros((len(obs), self.feature_size+args.angle_feat_size), np.float32)
+        teacher_actions = []
+        teacher_actions_1h = []
+        candidate_feats = []
+        candidate_masks = []
+        first_feat = np.zeros((len(obs), self.obs_dim), np.float32)
         for i, ob in enumerate(obs):
             first_feat[i, -args.angle_feat_size:] = utils.angle_feature(ob['heading'], ob['elevation'])
         first_feat = torch.from_numpy(first_feat).cuda()
@@ -307,9 +317,19 @@ class BaseVAE():
             if viewpoints is not None:
                 for i, ob in enumerate(obs):
                     viewpoints[i].append(ob['viewpoint'])
-            img_feats.append(self.listener._feature_variable(obs))
             teacher_action = self._teacher_action(obs, ended)
             teacher_action = teacher_action.cpu().numpy()
+            # TODO: why last teacher action not -1
+            teacher_actions.append(teacher_action.copy())
+            candidate_length = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
+            candidate_feat = np.zeros((len(obs), max(candidate_length), self.obs_dim))
+            # NOTE: The candidate_feat at len(ob['candidate']) is the feature for the END, which is zero in my implementation
+            for i, ob in enumerate(obs):
+                for j, c in enumerate(ob['candidate']):
+                    candidate_feat[i, j, :] = c['feature']
+            candidate_feats.append(torch.Tensor(candidate_feat).cuda())
+            candidate_masks.append(utils.length2mask(candidate_length))
+            img_feats.append(self._feature_variable(obs))
             for i, act in enumerate(teacher_action):
                 if act < 0 or act == len(obs[i]['candidate']):  # Ignore or Stop
                     teacher_action[i] = -1                      # Stop Action
@@ -318,57 +338,116 @@ class BaseVAE():
             length += (1 - ended)
             ended[:] = np.logical_or(ended, (teacher_action == -1))
             obs = self.env._get_obs()
+            # TODO: heading random ?
+            # TODO: policy decoder behavior clone
+            # TODO: state decoder mse
+            # TODO: state decoder weight = 0 ?
+
+        assert len(teacher_actions)==len(candidate_feats)==len(candidate_masks)
+        _max=0
+        for i in range(len(candidate_feats)):
+            _max = max(_max, candidate_feats[i].shape[1])
+        shape_list = np.array(candidate_feats[0].shape)
+        shape_list[1] = 1
+        feat_pad_vec = torch.zeros(tuple(shape_list)).cuda()
+        shape_list = np.array(candidate_masks[0].shape)
+        shape_list[1] = 1
+        mask_pad_vec = torch.ones(tuple(shape_list)).bool().cuda()
+        for i in range(len(candidate_feats)):
+            diff = _max - candidate_feats[i].shape[1]
+            diff2 = _max - candidate_masks[i].shape[1]
+            assert diff == diff2
+            if diff > 0:
+                candidate_feats[i] = torch.cat([candidate_feats[i], feat_pad_vec.repeat(1,diff,1)], dim=1)
+                candidate_masks[i] = torch.cat([candidate_masks[i], mask_pad_vec.repeat(1,diff)], dim=1)
+            # convert teacher actions to one-hot vectors
+            teacher_actions_1h.append(torch.nn.functional.one_hot(torch.LongTensor(teacher_actions[i]), num_classes=_max).cuda())
+
         img_feats = torch.stack(img_feats, 1).contiguous()  # batch_size, max_len, 36, 2052
         can_feats = torch.stack(can_feats, 1).contiguous()  # batch_size, max_len, 2052
+        teacher_actions_1h = torch.stack(teacher_actions_1h, 1).contiguous()
+        candidate_feats = torch.stack(candidate_feats, 1).contiguous()
+        candidate_masks = torch.stack(candidate_masks, 1).contiguous()
         if get_first_feat:
             return (img_feats, can_feats, first_feat), length
         else:
-            return (img_feats, can_feats), length
+            return (img_feats, can_feats, teacher_actions_1h, candidate_feats, candidate_masks), length
+        # NOTE: the last teacher_actions are all STOP(verified as below)
+        # torch.all(torch.eq(
+        #     torch.nn.functional.one_hot(
+        #         torch.sum(1-candidate_masks[:,-1,:].long(), dim=1)-1, num_classes=14
+        #         ),teacher_actions_1h[:,-1,:]
+        #     )
 
-#    def loss_generator(self, dataset):
-#        kl_weight = self.compute_kl_weight(0)
-#        for batch_idx, (batch, target) in enumerate(dataset.dataloader):
-#            mse, neg_ll, kl, bcloss, z_dist = self.forward(batch)
-#            mse = mse.mean(0)
-#            neg_ll = neg_ll.mean(0)
-#            kl = kl.mean(0)
-#            bcloss = bcloss.mean(0)
-#            if self.loss_type == 'mse':
-#                loss = self.vae_loss_weight * mse + kl_weight * kl + bcloss * self.bc_weight
-#            elif self.loss_type == 'll':
-#                loss = self.vae_loss_weight * neg_ll + kl_weight * kl + bcloss * self.bc_weight
-#            else:
-#                raise Exception('undefined loss type: '+self.loss_type+", expected mse or ll")
-#
-#            stats = {
-#                'MSE': mse,
-#                'Total Loss': loss,
-#                'LL': neg_ll,
-#                'KL Loss': kl,
-#                'BC Loss': bcloss
-#            }
-#            yield loss, stats
+    def _candidate_variable(self, obs, actions):
+        candidate_feat = np.zeros((len(obs), self.obs_dim), dtype=np.float32)
+        for i, (ob, act) in enumerate(zip(obs, actions)):
+            if act == -1:  # Ignore or Stop --> Just use zero vector as the feature
+                pass
+            else:
+                c = ob['candidate'][act]
+                candidate_feat[i, :] = c['feature'] # Image feat
+        return torch.from_numpy(candidate_feat).cuda()
 
-    # def train_epoch(self, dataset, epoch=0, train=True, max_steps=1e99):
-    #     full_stats = dict([('MSE',0), ('Total Loss', 0), ('LL', 0), ('KL Loss', 0),
-    #                        ('BC Loss', 0)])
-    #     n_batch = 0
-    #     self.optimizer.zero_grad()
-    #     for loss, stats in self.loss_generator(dataset):
-    #         if train:
-    #             loss.backward()
-    #             self.optimizer.step()
+    def make_equiv_action(self, a_t, perm_obs, perm_idx=None, traj=None):
+        def take_action(i, idx, name):
+            if type(name) is int:       # Go to the next view
+                self.env.env.sims[idx].makeAction(name, 0, 0)
+            else:                       # Adjust
+                self.env.env.sims[idx].makeAction(*self.env_actions[name])
+            state = self.env.env.sims[idx].getState()
+            if traj is not None:
+                traj[i]['path'].append((state.location.viewpointId, state.heading, state.elevation))
+        if perm_idx is None:
+            perm_idx = range(len(perm_obs))
+        for i, idx in enumerate(perm_idx):
+            action = a_t[i]
+            if action != -1:            # -1 is the <stop> action
+                select_candidate = perm_obs[i]['candidate'][action]
+                src_point = perm_obs[i]['viewIndex']
+                trg_point = select_candidate['pointId']
+                src_level = (src_point) // 12   # The point idx started from 0
+                trg_level = (trg_point) // 12
+                while src_level < trg_level:    # Tune up
+                    take_action(i, idx, 'up')
+                    src_level += 1
+                    # print("UP")
+                while src_level > trg_level:    # Tune down
+                    take_action(i, idx, 'down')
+                    src_level -= 1
+                    # print("DOWN")
+                while self.env.env.sims[idx].getState().viewIndex != trg_point:    # Turn right until the target
+                    take_action(i, idx, 'right')
+                    # print("RIGHT")
+                    # print(self.env.env.sims[idx].getState().viewIndex, trg_point)
+                assert select_candidate['viewpointId'] == \
+                       self.env.env.sims[idx].getState().navigableLocations[select_candidate['idx']].viewpointId
+                take_action(i, idx, select_candidate['idx'])
 
-    #         for k in stats.keys():
-    #             full_stats[k] += get_numpy(stats[k])[0]
-    #         n_batch += 1
-    #         if n_batch >= max_steps:
-    #             break
-    #         self.optimizer.zero_grad()
+    def _feature_variable(self, obs):
+        ''' Extract precomputed features into variable. '''
+        features = np.empty((len(obs), args.views, self.obs_dim), dtype=np.float32)
+        for i, ob in enumerate(obs):
+            features[i, :, :] = ob['feature']   # Image feat
+        return Variable(torch.from_numpy(features), requires_grad=False).cuda()
 
-    #     for k in full_stats.keys():
-    #         full_stats[k] /= n_batch
-
-    #     return full_stats
-
-
+    def _teacher_action(self, obs, ended):
+        """
+        Extract teacher actions into variable.
+        :param obs: The observation.
+        :param ended: Whether the action seq is ended
+        :return:
+        """
+        a = np.zeros(len(obs), dtype=np.int64)
+        for i, ob in enumerate(obs):
+            if ended[i]:                                            # Just ignore this index
+                a[i] = args.ignoreid
+            else:
+                for k, candidate in enumerate(ob['candidate']):
+                    if candidate['viewpointId'] == ob['teacher']:   # Next view point
+                        a[i] = k
+                        break
+                else:   # Stop here
+                    assert ob['teacher'] == ob['viewpoint']         # The teacher action should be "STAY HERE"
+                    a[i] = len(ob['candidate'])
+        return torch.from_numpy(a).cuda()
