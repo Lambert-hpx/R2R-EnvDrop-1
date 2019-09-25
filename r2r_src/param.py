@@ -88,6 +88,13 @@ class Param:
         self.parser.add_argument("--vae_latent_dim", default=16, type=int)
         self.parser.add_argument("--view_num", default=36, type=int)
         self.parser.add_argument("--path_len", default=2, type=int)
+        self.parser.add_argument("--load_vae", default=None, type=str)
+        self.parser.add_argument("--fix_vae", action="store_true")
+        self.parser.add_argument("--no_vae_policy", action="store_true")
+
+        # GAE
+        self.parser.add_argument("--gae", action="store_true")
+        self.parser.add_argument("--gae_lam", default=0.95, type=float) # TODO: ablation lamda
 
         self.args = self.parser.parse_args()
 

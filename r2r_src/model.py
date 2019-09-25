@@ -331,7 +331,6 @@ class AttnDecoderLSTM(nn.Module):
         h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
 
         h_1_drop = self.drop(h_1)
-        import pdb; pdb.set_trace()
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
 
         # Adding Dropout

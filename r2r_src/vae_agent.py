@@ -21,7 +21,6 @@ import param
 from param import args
 from collections import defaultdict
 
-
 class BaseAgent(object):
     ''' Base class for an R2R agent to generate and save trajectories. '''
 
@@ -90,6 +89,7 @@ class Seq2PolicyAgent(BaseAgent):
 
     def __init__(self, env, results_path, tok, episode_len=20):
         super(Seq2PolicyAgent, self).__init__(env, results_path)
+        self._iter = 0
         self.tok = tok
         self.episode_len = episode_len
         self.feature_size = self.env.feature_size
@@ -98,7 +98,15 @@ class Seq2PolicyAgent(BaseAgent):
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
         self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
                                          args.dropout, bidirectional=args.bidir).cuda()
-        self.decoder = model.AttnPolicyLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size, latent_dim=args.vae_latent_dim).cuda()
+        if args.no_vae_policy:
+            self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        else:
+            self.decoder = model.AttnPolicyLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size, latent_dim=args.vae_latent_dim).cuda()
+        if args.fix_vae:
+            print("fix the parameters in sub policy")
+            for param in self.decoder.policy.parameters():
+                param.requires_grad = False
+
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
 
@@ -441,10 +449,12 @@ class Seq2PolicyAgent(BaseAgent):
 
             self.rl_loss = rl_loss
             self.loss += rl_loss
+            self.logs['rl_loss'].append(self.rl_loss.detach().cpu().numpy())
 
         if train_ml is not None:
-            self.ml_loss = ml_loss
-            self.loss += ml_loss * train_ml / batch_size
+            self.ml_loss = ml_loss * train_ml / batch_size
+            self.loss += self.ml_loss
+            self.logs['ml_loss'].append(self.ml_loss.detach().cpu().numpy())
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
@@ -795,6 +805,7 @@ class Seq2PolicyAgent(BaseAgent):
 
             self.losses = []
             for iter in range(1, n_iters + 1):
+                self._iter += 1
 
                 self.encoder_optimizer.zero_grad()
                 self.decoder_optimizer.zero_grad()
@@ -838,6 +849,9 @@ class Seq2PolicyAgent(BaseAgent):
         for param in all_tuple:
             create_state(*param)
         torch.save(states, path)
+
+    def load_vae(self, path):
+        self.decoder.policy.load_state_dict(torch.load(path))
 
     def load(self, path):
         ''' Loads parameters (but not training state) '''

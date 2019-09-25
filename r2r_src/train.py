@@ -100,7 +100,7 @@ def train_speaker(train_env, tok, n_iters, log_every=500, val_envs={}):
             # Screen print out
             print("Bleu 1: %0.4f Bleu 2: %0.4f, Bleu 3 :%0.4f,  Bleu 4: %0.4f" % tuple(precisions))
 
-def train_vae_agent(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
+def train_vae_agent(train_env, tok, n_iters, log_every=10, valid_every=1000, val_envs={}, aug_env=None):
     writer = SummaryWriter(logdir=log_dir)
     listner = Seq2PolicyAgent(train_env, "", tok, args.maxAction)
     # listner = Seq2SeqAgent(train_env, "", tok, args.maxAction)
@@ -116,6 +116,10 @@ def train_vae_agent(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env
     if args.load is not None:
         print("LOAD THE listener from %s" % args.load)
         start_iter = listner.load(os.path.join(args.load))
+
+    if args.load_vae is not None:
+        print("LOAD sub-policy from %s" % args.load_vae)
+        listner.load_vae(os.path.join(args.load_vae))
 
     start = time.time()
 
@@ -165,52 +169,57 @@ def train_vae_agent(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env
         critic_loss = sum(listner.logs['critic_loss']) / total #/ length / args.batchSize
         entropy = sum(listner.logs['entropy']) / total #/ length / args.batchSize
         predict_loss = sum(listner.logs['us_loss']) / max(len(listner.logs['us_loss']), 1)
+        rl_loss = sum(listner.logs['rl_loss']) / max(len(listner.logs['rl_loss']), 1)
+        ml_loss = sum(listner.logs['ml_loss']) / max(len(listner.logs['ml_loss']), 1)
+
         writer.add_scalar("loss/critic", critic_loss, idx)
         writer.add_scalar("policy_entropy", entropy, idx)
         writer.add_scalar("loss/unsupervised", predict_loss, idx)
         writer.add_scalar("total_actions", total, idx)
         writer.add_scalar("max_length", length, idx)
-        print("total_actions", total)
-        print("max_length", length)
+        writer.add_scalar("rl_loss", rl_loss, idx)
+        writer.add_scalar("ml_loss", ml_loss, idx)
 
-        # Run validation
-        loss_str = ""
-        for env_name, (env, evaluator) in val_envs.items():
-            listner.env = env
+        if idx % valid_every == 0:
+            # Run validation
+            print("Run validation")
+            loss_str = ""
+            for env_name, (env, evaluator) in val_envs.items():
+                listner.env = env
 
-            # Get validation loss under the same conditions as training
-            iters = None if args.fast_train or env_name != 'train' else 20     # 20 * 64 = 1280
+                # Get validation loss under the same conditions as training
+                iters = None if args.fast_train or env_name != 'train' else 20     # 20 * 64 = 1280
 
-            # Get validation distance from goal under test evaluation conditions
-            listner.test(use_dropout=False, feedback='argmax', iters=iters)
-            result = listner.get_results()
-            score_summary, _ = evaluator.score(result)
-            loss_str += ", %s " % env_name
-            for metric,val in score_summary.items():
-                if metric in ['success_rate']:
-                    writer.add_scalar("accuracy/%s" % env_name, val, idx)
-                    if env_name in best_val:
-                        if val > best_val[env_name]['accu']:
-                            best_val[env_name]['accu'] = val
-                            best_val[env_name]['update'] = True
-                loss_str += ', %s: %.3f' % (metric, val)
+                # Get validation distance from goal under test evaluation conditions
+                listner.test(use_dropout=False, feedback='argmax', iters=iters)
+                result = listner.get_results()
+                score_summary, _ = evaluator.score(result)
+                loss_str += ", %s " % env_name
+                for metric,val in score_summary.items():
+                    if metric in ['success_rate']:
+                        writer.add_scalar("accuracy/%s" % env_name, val, idx)
+                        if env_name in best_val:
+                            if val > best_val[env_name]['accu']:
+                                best_val[env_name]['accu'] = val
+                                best_val[env_name]['update'] = True
+                    loss_str += ', %s: %.3f' % (metric, val)
 
-        for env_name in best_val:
-            if best_val[env_name]['update']:
-                best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
-                best_val[env_name]['update'] = False
-                listner.save(idx, os.path.join("snap", args.name, "state_dict", "best_%s" % (env_name)))
-
-        print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
-                                             iter, float(iter)/n_iters*100, loss_str)))
-
-        if iter % 1000 == 0:
-            print("BEST RESULT TILL NOW")
             for env_name in best_val:
-                print(env_name, best_val[env_name]['state'])
+                if best_val[env_name]['update']:
+                    best_val[env_name]['state'] = 'Iter %d %s' % (iter, loss_str)
+                    best_val[env_name]['update'] = False
+                    listner.save(idx, os.path.join("snap", args.name, "state_dict", "best_%s" % (env_name)))
 
-        if iter % 50000 == 0:
-            listner.save(idx, os.path.join("snap", args.name, "state_dict", "Iter_%06d" % (iter)))
+            print(('%s (%d %d%%) %s' % (timeSince(start, float(iter)/n_iters),
+                                                 iter, float(iter)/n_iters*100, loss_str)))
+
+            if iter % 1000 == 0:
+                print("BEST RESULT TILL NOW")
+                for env_name in best_val:
+                    print(env_name, best_val[env_name]['state'])
+
+            if iter % 50000 == 0:
+                listner.save(idx, os.path.join("snap", args.name, "state_dict", "Iter_%06d" % (iter)))
 
     listner.save(idx, os.path.join("snap", args.name, "state_dict", "LAST_iter%d" % (idx)))
 
