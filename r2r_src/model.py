@@ -209,7 +209,7 @@ class AttnPolicyLSTM(nn.Module):
     ''' An unrolled LSTM with attention over instructions for decoding navigation actions. '''
 
     def __init__(self, embedding_size, hidden_size,
-                       dropout_ratio, feature_size=2048+4, latent_dim=64, view_num=args.view_num, path_len=args.path_len):
+                       dropout_ratio, feature_size=2048+4, latent_dim=16, view_num=args.view_num, path_len=args.path_len):
         super(AttnPolicyLSTM, self).__init__()
         self.embedding_size = embedding_size
         self.feature_size = feature_size
@@ -224,7 +224,7 @@ class AttnPolicyLSTM(nn.Module):
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
         self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
         self.fc1 = nn.Linear(hidden_size, latent_dim)
-        # self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.candidate_att_layer = SoftDotAttention(latent_dim, feature_size)
         from vae import PolicyDecoder
         self.policy = PolicyDecoder(feature_size, latent_dim, view_num, path_len)
 
@@ -262,6 +262,7 @@ class AttnPolicyLSTM(nn.Module):
         h_1_drop = self.drop(h_1)
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
         z = self.fc1(h_tilde)
+        z_drop = self.drop(z)
 
         # Adding Dropout
         # h_tilde_drop = self.drop(h_tilde) # TODO: ablation droprate of z
@@ -269,12 +270,13 @@ class AttnPolicyLSTM(nn.Module):
         if not already_dropfeat:
             cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
 
-        # _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
-        feature = feature.unsqueeze(1)
-        cand_feat = cand_feat.unsqueeze(1)
-        # action_dist = self.policy(z, feature, cand_feat)
-        # logit = action_dist.prob
-        logit = self.policy(z, feature, cand_feat)
+        if args.no_vae_policy:
+            # _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
+            _, logit = self.candidate_att_layer(z_drop, cand_feat, output_prob=False)
+        else:
+            feature = feature.unsqueeze(1)
+            cand_feat = cand_feat.unsqueeze(1)
+            logit = self.policy(z, feature, cand_feat)
 
         return h_1, c_1, logit, h_tilde
 

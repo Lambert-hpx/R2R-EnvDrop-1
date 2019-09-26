@@ -90,6 +90,7 @@ class Param:
         self.parser.add_argument("--path_len", default=2, type=int)
         self.parser.add_argument("--load_vae", default=None, type=str)
         self.parser.add_argument("--fix_vae", action="store_true")
+        self.parser.add_argument("--original_decoder", action="store_true")
         self.parser.add_argument("--no_vae_policy", action="store_true")
 
         # GAE

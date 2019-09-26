@@ -1,4 +1,3 @@
-
 import torch
 
 import os
@@ -19,12 +18,10 @@ from vae import BaseVAE
 
 import warnings
 warnings.filterwarnings("ignore")
-
-
+import time
 from tensorboardX import SummaryWriter
 
-
-log_dir = 'snap/%s' % args.name
+log_dir = 'snap/%s/%s' % (args.name, time.strftime("%Y%m%d-%H%M%S"))
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 

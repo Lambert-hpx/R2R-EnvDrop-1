@@ -98,7 +98,7 @@ class Seq2PolicyAgent(BaseAgent):
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
         self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
                                          args.dropout, bidirectional=args.bidir).cuda()
-        if args.no_vae_policy:
+        if args.original_decoder:
             self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         else:
             self.decoder = model.AttnPolicyLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size, latent_dim=args.vae_latent_dim).cuda()
@@ -342,7 +342,7 @@ class Seq2PolicyAgent(BaseAgent):
                 policy_log_probs.append(log_probs.gather(1, a_t.unsqueeze(1)))   # Gather the log_prob for each batch
             elif self.feedback == 'sample':
                 probs = F.softmax(logit, 1)    # sampling an action from model
-                c = torch.distributions.Categorical(probs.detach())
+                c = torch.distributions.Categorical(probs)
                 self.logs['entropy'].append(c.entropy().sum().item())      # For log
                 entropys.append(c.entropy())                                # For optimization
                 a_t = c.sample().detach()
@@ -411,32 +411,62 @@ class Seq2PolicyAgent(BaseAgent):
                                             speaker is not None)
             rl_loss = 0.
 
-            # NOW, A2C!!!
-            # Calculate the final discounted reward
             last_value__ = self.critic(last_h_).detach()    # The value esti of the last state, remove the grad for safety
-            discount_reward = np.zeros(batch_size, np.float32)  # The inital reward is zero
-            for i in range(batch_size):
-                if not ended[i]:        # If the action is not ended, use the value function as the last reward
-                    discount_reward[i] = last_value__[i]
-
             length = len(rewards)
-            total = 0
-            for t in range(length-1, -1, -1):
-                discount_reward = discount_reward * args.gamma + rewards[t]   # If it ended, the reward will be 0
-                mask_ = Variable(torch.from_numpy(masks[t]), requires_grad=False).cuda()
-                clip_reward = discount_reward.copy()
-                r_ = Variable(torch.from_numpy(clip_reward), requires_grad=False).cuda()
-                v_ = self.critic(hidden_states[t])
-                a_ = (r_ - v_).detach()
+            if not args.gae: # A2C
+                # NOW, A2C!!!
+                # Calculate the final discounted reward
+                discount_reward = np.zeros(batch_size, np.float32)  # The inital reward is zero
+                for i in range(batch_size):
+                    if not ended[i]:        # If the action is not ended, use the value function as the last reward
+                        discount_reward[i] = last_value__[i]
 
-                # r_: The higher, the better. -ln(p(action)) * (discount_reward - value)
-                rl_loss += (-policy_log_probs[t] * a_ * mask_).sum()
-                rl_loss += (((r_ - v_) ** 2) * mask_).sum() * 0.5     # 1/2 L2 loss
-                if self.feedback == 'sample':
-                    rl_loss += (- 0.01 * entropys[t] * mask_).sum()
-                self.logs['critic_loss'].append((((r_ - v_) ** 2) * mask_).sum().item())
+                total = 0
+                for t in range(length-1, -1, -1):
+                    discount_reward = discount_reward * args.gamma + rewards[t]   # If it ended, the reward will be 0
+                    mask_ = Variable(torch.from_numpy(masks[t]), requires_grad=False).cuda()
+                    clip_reward = discount_reward.copy()
+                    r_ = Variable(torch.from_numpy(clip_reward), requires_grad=False).cuda()
+                    v_ = self.critic(hidden_states[t])
+                    a_ = (r_ - v_).detach()
 
-                total = total + np.sum(masks[t])
+                    # r_: The higher, the better. -ln(p(action)) * (discount_reward - value)
+                    rl_loss += (-policy_log_probs[t] * a_ * mask_).sum()
+                    rl_loss += (((r_ - v_) ** 2) * mask_).sum() * 0.5     # 1/2 L2 loss
+                    if self.feedback == 'sample':
+                        rl_loss += (- 0.01 * entropys[t] * mask_).sum()
+                    self.logs['critic_loss'].append((((r_ - v_) ** 2) * mask_).sum().item())
+
+                    total = total + np.sum(masks[t])
+            else:
+                last_value__ = last_value__ * torch.Tensor(ended).cuda() # last value only for which not ended
+                values = torch.zeros(length, batch_size).cuda()
+                advs = torch.zeros(length, batch_size).cuda()
+                for t in range(length):
+                    values[t,:]=self.critic(hidden_states[t]).detach()
+                lastgaelam=0
+                rewards = torch.Tensor(rewards).cuda()
+                masks = torch.Tensor(masks).cuda()
+                for t in range(length-1, -1, -1):
+                    if t==length-1:
+                        nextnonterminal = masks[t]
+                        next_value = last_value__
+                    else:
+                        nextnonterminal = masks[t+1]
+                        next_value = values[t+1]
+                    delta = rewards[t] + args.gamma * next_value * nextnonterminal - values[t]
+                    advs[t,:] = lastgaelam = delta + args.gamma * args.gae_lam * nextnonterminal * lastgaelam
+                returns = advs + values
+                # Normalize the advantages
+                advs = (advs - advs.mean()) / (advs.std() + 1e-8)
+                total=0
+                for t in range(length-1, -1, -1):
+                    mask_ = Variable(masks[t], requires_grad=False).cuda()
+                    v_ = self.critic(hidden_states[t])
+                    rl_loss += (-policy_log_probs[t] * advs[t] * mask_).sum()
+                    rl_loss += (((returns[t,:] - v_) ** 2) * mask_).sum() # TODO: vf_loss1, vf_loss2, clip
+                    total = total + torch.sum(masks[t]).cpu().item()
+
             self.logs['total'].append(total)
 
             # Normalize the loss function
@@ -796,34 +826,33 @@ class Seq2PolicyAgent(BaseAgent):
 
     def train(self, n_iters, feedback='teacher', **kwargs):
         ''' Train for a given number of iterations '''
-        with torch.autograd.set_detect_anomaly(True):
-            self.feedback = feedback
+        self.feedback = feedback
 
-            self.encoder.train()
-            self.decoder.train()
-            self.critic.train()
+        self.encoder.train()
+        self.decoder.train()
+        self.critic.train()
 
-            self.losses = []
-            for iter in range(1, n_iters + 1):
-                self._iter += 1
+        self.losses = []
+        for iter in range(1, n_iters + 1):
+            self._iter += 1
 
-                self.encoder_optimizer.zero_grad()
-                self.decoder_optimizer.zero_grad()
-                self.critic_optimizer.zero_grad()
+            self.encoder_optimizer.zero_grad()
+            self.decoder_optimizer.zero_grad()
+            self.critic_optimizer.zero_grad()
 
-                self.loss = 0
-                if feedback == 'teacher':
+            self.loss = 0
+            if feedback == 'teacher':
+                self.feedback = 'teacher'
+                self.rollout(train_ml=args.teacher_weight, train_rl=False, **kwargs)
+            elif feedback == 'sample':
+                if args.ml_weight != 0:
                     self.feedback = 'teacher'
-                    self.rollout(train_ml=args.teacher_weight, train_rl=False, **kwargs)
-                elif feedback == 'sample':
-                    if args.ml_weight != 0:
-                        self.feedback = 'teacher'
-                        self.rollout(train_ml=args.ml_weight, train_rl=False, **kwargs)
-                    self.feedback = 'sample'
-                    self.rollout(train_ml=None, train_rl=True, **kwargs)
-                else:
-                    assert False
-                self.loss.backward()
+                    self.rollout(train_ml=args.ml_weight, train_rl=False, **kwargs)
+                self.feedback = 'sample'
+                self.rollout(train_ml=None, train_rl=True, **kwargs)
+            else:
+                assert False
+            self.loss.backward()
 
             torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
             torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)
