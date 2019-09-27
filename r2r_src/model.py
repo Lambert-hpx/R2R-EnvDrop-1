@@ -226,7 +226,8 @@ class AttnPolicyLSTM(nn.Module):
         self.fc1 = nn.Linear(hidden_size, latent_dim)
         self.candidate_att_layer = SoftDotAttention(latent_dim, feature_size)
         from vae import PolicyDecoder
-        self.policy = PolicyDecoder(feature_size, latent_dim, view_num, path_len)
+        # self.policy = PolicyDecoder(feature_size, latent_dim, view_num, path_len)
+        self.policy = PolicyDecoder(feature_size, hidden_size, view_num, path_len)
 
     def forward(self, action, feature, cand_feat,
                 h_0, prev_h1, c_0,
@@ -261,11 +262,11 @@ class AttnPolicyLSTM(nn.Module):
 
         h_1_drop = self.drop(h_1)
         h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
-        z = self.fc1(h_tilde)
-        z_drop = self.drop(z)
+        # z = self.fc1(h_tilde)
+        # z_drop = self.drop(z)
 
         # Adding Dropout
-        # h_tilde_drop = self.drop(h_tilde) # TODO: ablation droprate of z
+        h_tilde_drop = self.drop(h_tilde) # TODO: ablation droprate of z
 
         if not already_dropfeat:
             cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
@@ -274,9 +275,9 @@ class AttnPolicyLSTM(nn.Module):
             # _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
             _, logit = self.candidate_att_layer(z_drop, cand_feat, output_prob=False)
         else:
-            feature = feature.unsqueeze(1)
-            cand_feat = cand_feat.unsqueeze(1)
-            logit = self.policy(z, feature, cand_feat)
+            # feature = feature.unsqueeze(1)
+            # cand_feat = cand_feat.unsqueeze(1)
+            logit = self.policy(h_tilde_drop, feature, cand_feat)
 
         return h_1, c_1, logit, h_tilde
 

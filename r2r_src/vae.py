@@ -150,26 +150,49 @@ class PolicyDecoder(nn.Module):
         self.relu1 = nn.LeakyReLU()
         self.fc2 = nn.Linear(obs_dim, hidden_dim)
         self.relu2 = nn.LeakyReLU()
-        self.pred_layer = model.SoftDotAttention(hidden_dim, hidden_dim)
+        self.feat_attn_layer = model.SoftDotAttention(latent_dim, latent_dim)
+        # self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
+        self.cand_attn_layer = model.SoftDotAttention(latent_dim, latent_dim)
+        self.fc3 = nn.Linear(obs_dim, latent_dim)
+        self.relu3 = nn.LeakyReLU()
+        self.fc4 = nn.Linear(obs_dim, latent_dim)
+        self.relu4 = nn.LeakyReLU()
+        self.relu5 = nn.LeakyReLU()
 
-    def forward(self, z, img_feats, candidate_feats, candidate_masks=None):
-        # import pdb; pdb.set_trace()
-        (bs, path_len, view_dim, obs_dim) = img_feats.size()
-        x = img_feats.view(-1, view_dim, obs_dim)
-        z = z.unsqueeze(1).unsqueeze(1).repeat(1, path_len, view_dim, 1).view(bs*path_len, view_dim, -1) # (bs*path_len, view_dim, latent_dim)
-        x = torch.cat([x, z], -1) # TODO: balance energy between x,z
-        x, attn = self.view_atten(x) # (bs*path_len, hidden_dim)
-        x = self.relu1(self.fc1(x))
-        (bs, path_len, candidate_num, obs_dim) = candidate_feats.size()
-        candidate_feats = candidate_feats.view(bs*path_len, candidate_num, obs_dim)
-        candidate_feats = self.relu2(self.fc2(candidate_feats))
-        if candidate_masks is not None:
-            candidate_masks = candidate_masks.view(bs*path_len, candidate_num)
-        # _, logit = self.pred_layer(x, candidate_feats, mask=candidate_masks, output_prob=False) # output logit rather than prob
-        _, prob = self.pred_layer(x, candidate_feats, mask=candidate_masks)
-        dist = Categorical(prob)
-        # return dist
-        return prob
+    def forward(self, z, img_feats, cand_feats, candidate_masks=None):
+        # 009
+        # attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
+        # attn_feat = self.relu3(self.fc3(attn_feat))
+        # _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
+        # 010
+        attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
+        _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
+        return logit
+        # 011
+        # img_feats = self.relu3(self.fc3(img_feats))
+        # cand_feats = self.relu4(self.fc4(cand_feats))
+        # attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
+        # # 012
+        # attn_feat = self.relu5(attn_feat)
+        # _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
+        # return logit
+
+        # (bs, path_len, view_dim, obs_dim) = img_feats.size()
+        # x = img_feats.view(-1, view_dim, obs_dim)
+        # z = z.unsqueeze(1).unsqueeze(1).repeat(1, path_len, view_dim, 1).view(bs*path_len, view_dim, -1) # (bs*path_len, view_dim, latent_dim)
+        # x = torch.cat([x, z], -1) # TODO: balance energy between x,z
+        # x, attn = self.view_atten(x) # (bs*path_len, hidden_dim)
+        # x = self.relu1(self.fc1(x))
+        # (bs, path_len, candidate_num, obs_dim) = candidate_feats.size()
+        # candidate_feats = candidate_feats.view(bs*path_len, candidate_num, obs_dim)
+        # candidate_feats = self.relu2(self.fc2(candidate_feats))
+        # if candidate_masks is not None:
+        #     candidate_masks = candidate_masks.view(bs*path_len, candidate_num)
+        # # _, logit = self.pred_layer(x, candidate_feats, mask=candidate_masks, output_prob=False) # output logit rather than prob
+        # _, prob = self.pred_layer(x, candidate_feats, mask=candidate_masks)
+        # dist = Categorical(prob)
+        # # return dist
+        # return prob
 
 class BaseVAE(nn.Module):
     env_actions = {

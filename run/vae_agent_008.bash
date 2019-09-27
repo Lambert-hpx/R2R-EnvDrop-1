@@ -1,4 +1,5 @@
 # candidate_att_layer receive z as input
+# dropout z
 name=$(echo $0 | cut -d. -f1 | cut -d/ -f2)
 flag="--attn soft --train vae_agent
       --featdropout 0.3
