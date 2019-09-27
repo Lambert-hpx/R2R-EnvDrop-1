@@ -277,7 +277,7 @@ class AttnPolicyLSTM(nn.Module):
         else:
             # feature = feature.unsqueeze(1)
             # cand_feat = cand_feat.unsqueeze(1)
-            logit = self.policy(h_tilde_drop, feature, cand_feat)
+            logit = self.policy(h_tilde_drop, action_embeds, feature, cand_feat)
 
         return h_1, c_1, logit, h_tilde
 

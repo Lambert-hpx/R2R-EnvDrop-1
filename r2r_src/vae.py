@@ -150,32 +150,39 @@ class PolicyDecoder(nn.Module):
         self.relu1 = nn.LeakyReLU()
         self.fc2 = nn.Linear(obs_dim, hidden_dim)
         self.relu2 = nn.LeakyReLU()
-        self.feat_attn_layer = model.SoftDotAttention(latent_dim, latent_dim)
+        self.feat_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
         # self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
-        self.cand_attn_layer = model.SoftDotAttention(latent_dim, latent_dim)
+        self.cand_attn_layer = model.SoftDotAttention(latent_dim+obs_dim+args.aemb, obs_dim)
         self.fc3 = nn.Linear(obs_dim, latent_dim)
         self.relu3 = nn.LeakyReLU()
         self.fc4 = nn.Linear(obs_dim, latent_dim)
         self.relu4 = nn.LeakyReLU()
         self.relu5 = nn.LeakyReLU()
+        self.drop = nn.Dropout(p=args.dropout)
 
-    def forward(self, z, img_feats, cand_feats, candidate_masks=None):
-        # 009
-        # attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
-        # attn_feat = self.relu3(self.fc3(attn_feat))
-        # _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
+    def forward(self, z, action_embeds, img_feats, cand_feats, candidate_masks=None):
         # 010
-        attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
-        _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
-        return logit
-        # 011
-        # img_feats = self.relu3(self.fc3(img_feats))
-        # cand_feats = self.relu4(self.fc4(cand_feats))
         # attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
-        # # 012
-        # attn_feat = self.relu5(attn_feat)
         # _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
         # return logit
+
+        # 010_0
+        # _, logit = self.cand_attn_layer(z, cand_feats, output_prob=False)
+        # return logit
+
+        attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
+
+        # 010_1
+        # concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+
+        # 010_3
+        concat_input = torch.cat((z, action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+
+        # 010_2
+        concat_input = self.drop(concat_input)
+
+        _, logit = self.cand_attn_layer(concat_input, cand_feats, output_prob=False)
+        return logit
 
         # (bs, path_len, view_dim, obs_dim) = img_feats.size()
         # x = img_feats.view(-1, view_dim, obs_dim)
