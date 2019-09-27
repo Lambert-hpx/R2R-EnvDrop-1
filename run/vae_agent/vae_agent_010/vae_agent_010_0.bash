@@ -1,6 +1,7 @@
 # simplify the structure of policy decoder, no preload, no fix
 # baseline, control group
-name=$(echo $0 | cut -d. -f1 | cut -d/ -f2)
+name=$(echo $0 | awk -F'/' '{print $NF}' | awk -F'.' '{print $1}')
+echo $name
 flag="--attn soft --train vae_agent
       --featdropout 0.3
       --angleFeatSize 128

@@ -145,45 +145,17 @@ class PolicyDecoder(nn.Module):
         self.latent_dim = latent_dim
         self.view_dim = view_dim
         self.path_len = path_len
-        self.view_atten = model.SelfAttention(obs_dim+latent_dim, hidden_dim)
-        self.fc1 = nn.Linear(obs_dim+latent_dim, hidden_dim)
-        self.relu1 = nn.LeakyReLU()
-        self.fc2 = nn.Linear(obs_dim, hidden_dim)
-        self.relu2 = nn.LeakyReLU()
         self.feat_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
         # self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
-        self.cand_attn_layer = model.SoftDotAttention(latent_dim+obs_dim+args.aemb, obs_dim)
-        self.fc3 = nn.Linear(obs_dim, latent_dim)
-        self.relu3 = nn.LeakyReLU()
-        self.fc4 = nn.Linear(obs_dim, latent_dim)
-        self.relu4 = nn.LeakyReLU()
-        self.relu5 = nn.LeakyReLU()
-        self.drop = nn.Dropout(p=args.dropout)
+        self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
 
-    def forward(self, z, action_embeds, img_feats, cand_feats, candidate_masks=None):
-        # 010
-        # attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
-        # _, logit = self.cand_attn_layer(attn_feat, cand_feats, output_prob=False)
-        # return logit
-
-        # 010_0
-        # _, logit = self.cand_attn_layer(z, cand_feats, output_prob=False)
-        # return logit
-
-        attn_feat, _ = self.feat_attn_layer(z, img_feats, output_tilde=False)
-
-        # 010_1
-        # concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-
-        # 010_3
-        concat_input = torch.cat((z, action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-
-        # 010_2
-        concat_input = self.drop(concat_input)
-
-        _, logit = self.cand_attn_layer(concat_input, cand_feats, output_prob=False)
-        return logit
-
+    def forward(self, z, cand_feats, cand_masks=None):
+        (bs, path_len, cand_num, obs_dim) = cand_feats.size()
+        z = z.unsqueeze(1).repeat(1, path_len, 1).view(bs*path_len, -1) # (bs*path_len, cand_num, latent_dim)
+        cand_feats = cand_feats.view(bs*path_len, cand_num, obs_dim)
+        _, prob = self.cand_attn_layer(z, cand_feats)
+        dist = Categorical(prob)
+        return dist
         # (bs, path_len, view_dim, obs_dim) = img_feats.size()
         # x = img_feats.view(-1, view_dim, obs_dim)
         # z = z.unsqueeze(1).unsqueeze(1).repeat(1, path_len, view_dim, 1).view(bs*path_len, view_dim, -1) # (bs*path_len, view_dim, latent_dim)
@@ -261,7 +233,7 @@ class BaseVAE(nn.Module):
         state_dist = self.decoder.forward(z, s0.detach())
         # forward policy decoder
         # NOTE: don't predict last action(use STOP as label may misleading)
-        action_dist = self.policy.forward(z, img_feats[:,:-1,:,:].contiguous(), candidate_feats[:,:-1,:,:].contiguous(), candidate_masks[:,:-1,:].contiguous()) # dist shape(bs*path_len, num_classes)
+        action_dist = self.policy.forward(z, candidate_feats[:,:-1,:,:].contiguous(), candidate_masks[:,:-1,:].contiguous()) # dist shape(bs*path_len, num_classes)
         # compute loss
         y_state = img_feats[:,1:,:,:].view(batch_size,-1) # gt for state decoder
         # behavior clone loss

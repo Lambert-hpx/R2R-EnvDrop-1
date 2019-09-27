@@ -1,4 +1,4 @@
-name=vae_012
+name=$(echo $0 | awk -F'/' '{print $NF}' | awk -F'.' '{print $1}')
 flag="--train vae 
       --optim adam --lr 1e-5 --iters 100000
       --vae_loss_weight 1

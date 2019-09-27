@@ -1,6 +1,6 @@
 # simplify the structure of policy decoder, no preload, no fix
 # add action emb for decoder
-name=$(echo $0 | cut -d. -f1 | cut -d/ -f2)
+name=$(echo $0 | awk -F'/' '{print $NF}' | awk -F'.' '{print $1}')
 flag="--attn soft --train vae_agent
       --featdropout 0.3
       --angleFeatSize 128
