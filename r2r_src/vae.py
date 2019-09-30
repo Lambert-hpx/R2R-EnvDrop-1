@@ -145,7 +145,6 @@ class PolicyDecoder(nn.Module):
         self.latent_dim = latent_dim
         self.view_dim = view_dim
         self.path_len = path_len
-        self.feat_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
         # self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
         self.cand_attn_layer = model.SoftDotAttention(latent_dim, obs_dim)
 
@@ -154,8 +153,9 @@ class PolicyDecoder(nn.Module):
         z = z.unsqueeze(1).repeat(1, path_len, 1).view(bs*path_len, -1) # (bs*path_len, cand_num, latent_dim)
         cand_feats = cand_feats.view(bs*path_len, cand_num, obs_dim)
         _, prob = self.cand_attn_layer(z, cand_feats)
-        dist = Categorical(prob)
-        return dist
+        # dist = Categorical(prob)
+        # return dist
+        return prob
         # (bs, path_len, view_dim, obs_dim) = img_feats.size()
         # x = img_feats.view(-1, view_dim, obs_dim)
         # z = z.unsqueeze(1).unsqueeze(1).repeat(1, path_len, view_dim, 1).view(bs*path_len, view_dim, -1) # (bs*path_len, view_dim, latent_dim)

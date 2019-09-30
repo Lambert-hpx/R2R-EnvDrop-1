@@ -275,9 +275,9 @@ class AttnPolicyLSTM(nn.Module):
             # _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
             _, logit = self.candidate_att_layer(z_drop, cand_feat, output_prob=False)
         else:
-            # feature = feature.unsqueeze(1)
-            # cand_feat = cand_feat.unsqueeze(1)
-            logit = self.policy(h_tilde_drop, action_embeds, feature, cand_feat)
+            feature = feature.unsqueeze(1) # add path_len
+            cand_feat = cand_feat.unsqueeze(1) # add path_len
+            logit = self.policy(h_tilde_drop, cand_feat)
 
         return h_1, c_1, logit, h_tilde
 

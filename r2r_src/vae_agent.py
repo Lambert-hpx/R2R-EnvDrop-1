@@ -880,7 +880,13 @@ class Seq2PolicyAgent(BaseAgent):
         torch.save(states, path)
 
     def load_vae(self, path):
-        self.decoder.policy.load_state_dict(torch.load(path))
+        model = self.decoder.policy
+        model_keys = set(model.state_dict().keys())
+        states = torch.load(path)
+        _state = {}
+        for k in model_keys:
+            _state[k]=states[k]
+        model.load_state_dict(_state)
 
     def load(self, path):
         ''' Loads parameters (but not training state) '''
@@ -891,7 +897,10 @@ class Seq2PolicyAgent(BaseAgent):
             load_keys = set(states[name]['state_dict'].keys())
             if model_keys != load_keys:
                 print("NOTICE: DIFFERENT KEYS IN THE LISTEREN")
-            state.update(states[name]['state_dict'])
+            _state = {}
+            for k in model_keys:
+                _state[k]=states[name]['state_dict'][k]
+            state.update(_state)
             model.load_state_dict(state)
             if args.loadOptim:
                 optimizer.load_state_dict(states[name]['optimizer'])
