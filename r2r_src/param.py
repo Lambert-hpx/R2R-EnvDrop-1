@@ -77,6 +77,35 @@ class Param:
 
         self.parser.add_argument("--angleFeatSize", dest="angle_feat_size", type=int, default=4)
 
+        # bc
+        self.parser.add_argument("--bc_episode_len", default=10, type=int)
+        self.parser.add_argument("--max_candidate_len", default=14, type=int)
+        # bert
+        # self.parser.add_argument("--llayers", default=9, type=int, help='Number of Language layers')
+        self.parser.add_argument("--llayers", default=1, type=int, help='Number of Language layers')
+        # self.parser.add_argument("--xlayers", default=5, type=int, help='Number of CROSS-modality layers.')
+        self.parser.add_argument("--xlayers", default=1, type=int, help='Number of CROSS-modality layers.')
+        # self.parser.add_argument("--rlayers", default=5, type=int, help='Number of object Relationship layers.')
+        self.parser.add_argument("--rlayers", default=1, type=int, help='Number of object Relationship layers.')
+        # bert config
+        self.parser.add_argument("--max_seq_length", default=40, type=int)
+        self.parser.add_argument("--vocab_size", default=30522, type=int)
+        self.parser.add_argument("--hidden_size", default=768, type=int)
+        self.parser.add_argument("--num_hidden_layers", default=12, type=int)
+        self.parser.add_argument("--num_attention_heads", default=12, type=int)
+        self.parser.add_argument("--intermediate_size", default=3072, type=int)
+        self.parser.add_argument("--hidden_act", default="gelu", type=str)
+        self.parser.add_argument("--hidden_dropout_prob", default=0.1, type=float)
+        self.parser.add_argument("--attention_probs_dropout_prob", default=0.1, type=float)
+        self.parser.add_argument("--max_position_embeddings", default=512, type=int)
+        self.parser.add_argument("--type_vocab_size", default=2, type=int)
+        self.parser.add_argument("--initializer_range", default=0.02, type=float)
+        self.parser.add_argument("--fromScratch", dest='from_scratch', action='store_const', default=False, const=True,
+            help='If none of the --load, --loadLXMERT, --loadLXMERTQA is set, '
+            'the model would be trained from scratch. If --fromScratch is'
+            ' not specified, the model would load BERT-pre-trained weights by'
+            ' default. ')
+
         # A2C
         self.parser.add_argument("--gamma", default=0.9, type=float)
         self.parser.add_argument("--normalize", dest="normalize_loss", default="total", type=str, help='batch or total')

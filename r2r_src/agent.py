@@ -20,6 +20,7 @@ import model
 import param
 from param import args
 from collections import defaultdict
+from lxrt.entry import LXRTEncoder
 
 
 class BaseAgent(object):
@@ -31,7 +32,7 @@ class BaseAgent(object):
         random.seed(1)
         self.results = {}
         self.losses = [] # For learning agents
-    
+
     def write_results(self):
         output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
@@ -96,17 +97,15 @@ class Seq2SeqAgent(BaseAgent):
 
         # Models
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
-        self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
-                                         args.dropout, bidirectional=args.bidir).cuda()
-        self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        # self.critic = nn.DataParallel(model.Critic().cuda())
         self.critic = model.Critic().cuda()
-        self.models = (self.encoder, self.decoder, self.critic)
+        self.lxrt_encoder = LXRTEncoder(args).cuda()
+        # self.lxrt_encoder.multi_gpu() # language bert on gpu 0
 
         # Optimizers
-        self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
-        self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
-        self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer)
+        self.lxrt_optimizer = args.optimizer(self.lxrt_encoder.parameters(), lr=args.lr)
+        self.optimizers = (self.critic_optimizer, self.lxrt_optimizer)
 
         # Evaluations
         self.losses = []
@@ -165,6 +164,29 @@ class Seq2SeqAgent(BaseAgent):
 
         return input_a_t, f_t, candidate_feat, candidate_leng
 
+    def _candidate_variable1(self, obs):
+        candidate_leng = [len(ob['candidate']) + 1 for ob in obs]       # +1 is for the end
+        candidate_feat = np.zeros((len(obs), args.max_candidate_len, self.feature_size + args.angle_feat_size), dtype=np.float32)
+        # Note: The candidate_feat at len(ob['candidate']) is the feature for the END
+        # which is zero in my implementation
+        for i, ob in enumerate(obs):
+            for j, c in enumerate(ob['candidate']):
+                candidate_feat[i, j, :] = c['feature']                         # Image feat
+        return torch.from_numpy(candidate_feat).cuda(), candidate_leng
+
+    def get_input_feat1(self, obs):
+        input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
+        sent=[]
+        for i, ob in enumerate(obs):
+            input_a_t[i] = utils.angle_feature(ob['heading'], ob['elevation'])
+            sent.append(ob['instructions'])
+        input_a_t = torch.from_numpy(input_a_t).cuda()
+
+        f_t = self._feature_variable(obs)      # Image features from obs
+        candidate_feat, candidate_leng = self._candidate_variable1(obs)
+
+        return f_t[:,:,:-4], f_t[:,:,-4:], sent, input_a_t, candidate_feat, candidate_leng, f_t
+
     def _teacher_action(self, obs, ended):
         """
         Extract teacher actions into variable.
@@ -188,7 +210,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def make_equiv_action(self, a_t, perm_obs, perm_idx=None, traj=None):
         """
-        Interface between Panoramic view and Egocentric view 
+        Interface between Panoramic view and Egocentric view
         It will convert the action panoramic view action a_t to equivalent egocentric view actions for the simulator
         """
         def take_action(i, idx, name):
@@ -220,6 +242,19 @@ class Seq2SeqAgent(BaseAgent):
                 assert select_candidate['viewpointId'] == \
                        self.env.env.sims[idx].getState().navigableLocations[select_candidate['idx']].viewpointId
                 take_action(i, idx, select_candidate['idx'])
+
+    def _make_hist_feat(self, target, candidate_feat, f_t):
+        bs, _, feature_size = candidate_feat.shape
+        target_angle_feat = torch.zeros(bs, args.angle_feat_size).cuda()
+        for i, t in enumerate(target):
+            if t == args.ignoreid:
+                continue
+            else:
+                target_angle_feat[i,:]=candidate_feat[i,t,-args.angle_feat_size:]
+        _, pano_num, _ = f_t.shape
+        target_angle_feat = target_angle_feat.unsqueeze(1).expand(-1, pano_num, -1)
+        hist_feat = torch.cat([f_t, target_angle_feat], dim=2) # batch, pano_num, feat_size+angle_size*2
+        return hist_feat
 
     def rollout(self, train_ml=None, train_rl=True, reset=True, speaker=None):
         """
@@ -264,9 +299,6 @@ class Seq2SeqAgent(BaseAgent):
         seq, seq_mask, seq_lengths, perm_idx = self._sort_batch(obs)
         perm_obs = obs[perm_idx]
 
-        ctx, h_t, c_t = self.encoder(seq, seq_lengths)
-        ctx_mask = seq_mask
-
         # Init the reward shaping
         last_dist = np.zeros(batch_size, np.float32)
         for i, ob in enumerate(perm_obs):   # The init distance from the view point to the target
@@ -286,31 +318,33 @@ class Seq2SeqAgent(BaseAgent):
 
         # Init the logs
         rewards = []
-        hidden_states = []
         policy_log_probs = []
         masks = []
         entropys = []
         ml_loss = 0.
+        hidden_states = []
+        hist = []
+        # TODO: use hist information
+            # if t == 0:
+            #     pass
+            # else:
+            #     hist_tensor = torch.cat(hist, dim=1)
+            # compute loss
 
-        h1 = h_t
+        feat, pos, sent, input_a_t, candidate_feat, candidate_leng, f_t = self.get_input_feat1(perm_obs)
+        input_ids, input_mask, segment_ids = self.lxrt_encoder.forward_enc(sent)
         for t in range(self.episode_len):
-
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            feat, pos, sent, input_a_t, candidate_feat, candidate_leng, f_t = self.get_input_feat1(perm_obs)
+            # logit, h = self.lxrt_encoder(sent, (feat, pos), candidate_feat)
+            logit, h = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos), candidate_feat)
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
 
-            h_t, c_t, logit, h1 = self.decoder(input_a_t, f_t, candidate_feat,
-                                               h_t, h1, c_t,
-                                               ctx, ctx_mask,
-                                               already_dropfeat=(speaker is not None))
-
-            hidden_states.append(h_t)
-
             # Mask outputs where agent can't move forward
             # Here the logit is [b, max_candidate]
-            candidate_mask = utils.length2mask(candidate_leng)
-            if args.submit:     # Avoding cyclic path
+            candidate_mask = utils.length2mask(candidate_leng, args.max_candidate_len)
+            if args.submit:     # Avoding cyclic path # TODO: it work or not?
                 for ob_id, ob in enumerate(perm_obs):
                     visited[ob_id].add(ob['viewpoint'])
                     for c_id, c in enumerate(ob['candidate']):
@@ -321,11 +355,12 @@ class Seq2SeqAgent(BaseAgent):
             # Supervised training
             target = self._teacher_action(perm_obs, ended)
             ml_loss += self.criterion(logit, target)
+            hidden_states.append(h)
 
             # Determine next model inputs
             if self.feedback == 'teacher':
                 a_t = target                # teacher forcing
-            elif self.feedback == 'argmax': 
+            elif self.feedback == 'argmax':
                 _, a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
                 log_probs = F.log_softmax(logit, 1)                              # Calculate the log_prob here
@@ -340,6 +375,11 @@ class Seq2SeqAgent(BaseAgent):
             else:
                 print(self.feedback)
                 sys.exit('Invalid feedback option')
+
+            # update hist memory
+            # hist_feat = self._make_hist_feat(target, candidate_feat.detach(), f_t.detach())
+            # hist.append(hist_feat)
+
 
             # Prepare environment action
             # NOTE: Env action is in the perm_obs space
@@ -386,19 +426,17 @@ class Seq2SeqAgent(BaseAgent):
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
 
             # Early exit if all ended
-            if ended.all(): 
+            if ended.all():
                 break
 
         if train_rl:
             # Last action in A2C
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            feat, pos, sent, input_a_t, candidate_feat, candidate_leng, f_t = self.get_input_feat1(perm_obs)
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
-            last_h_, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
-                                            h_t, h1, c_t,
-                                            ctx, ctx_mask,
-                                            speaker is not None)
+            # _, last_h_ = self.lxrt_encoder(sent, (feat, pos), candidate_feat)
+            _, last_h_ = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos),candidate_feat)
             rl_loss = 0.
 
             # NOW, A2C!!!
@@ -437,10 +475,13 @@ class Seq2SeqAgent(BaseAgent):
             else:
                 assert args.normalize_loss == 'none'
 
+            self.logs["rl_loss"].append(rl_loss)
             self.loss += rl_loss
 
         if train_ml is not None:
-            self.loss += ml_loss * train_ml / batch_size
+            ml_loss = ml_loss * train_ml / batch_size
+            self.logs["ml_loss"].append(ml_loss)
+            self.loss += ml_loss
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
@@ -588,7 +629,7 @@ class Seq2SeqAgent(BaseAgent):
                     continue
                 for j in range(len(ob['candidate']) + 1):               # +1 to include the <end> action
                     # score + log_prob[action]
-                    modified_log_prob = log_probs[i][j].detach().cpu().item() 
+                    modified_log_prob = log_probs[i][j].detach().cpu().item()
                     new_score = current_state['score'] + modified_log_prob
                     if j < len(candidate):                        # A normal action
                         next_id = make_state_id(current_viewpoint, j)
@@ -742,12 +783,10 @@ class Seq2SeqAgent(BaseAgent):
         ''' Evaluate once on each instruction in the current environment '''
         self.feedback = feedback
         if use_dropout:
-            self.encoder.train()
-            self.decoder.train()
+            self.lxrt_encoder.train()
             self.critic.train()
         else:
-            self.encoder.eval()
-            self.decoder.eval()
+            self.lxrt_encoder.eval()
             self.critic.eval()
         super(Seq2SeqAgent, self).test(iters)
 
@@ -779,21 +818,20 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder_optimizer.step()
         self.decoder_optimizer.step()
         self.critic_optimizer.step()
+        self.lxrt_optimizer.step()
 
     def train(self, n_iters, feedback='teacher', **kwargs):
         ''' Train for a given number of iterations '''
         self.feedback = feedback
 
-        self.encoder.train()
-        self.decoder.train()
         self.critic.train()
+        self.lxrt_encoder.train()
 
         self.losses = []
         for iter in range(1, n_iters + 1):
 
-            self.encoder_optimizer.zero_grad()
-            self.decoder_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
+            self.lxrt_optimizer.zero_grad()
 
             self.loss = 0
             if feedback == 'teacher':
@@ -810,12 +848,11 @@ class Seq2SeqAgent(BaseAgent):
 
             self.loss.backward()
 
-            torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
-            torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)
+            torch.nn.utils.clip_grad_norm(self.critic.parameters(), 40.)
+            torch.nn.utils.clip_grad_norm(self.lxrt_encoder.parameters(), 40.)
 
-            self.encoder_optimizer.step()
-            self.decoder_optimizer.step()
             self.critic_optimizer.step()
+            self.lxrt_optimizer.step()
 
     def save(self, epoch, path):
         ''' Snapshot models '''
@@ -828,9 +865,8 @@ class Seq2SeqAgent(BaseAgent):
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
             }
-        all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
-                     ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer)]
+        all_tuple = [("critic", self.critic, self.critic_optimizer),
+                     ("lxrt_encoder", self.lxrt_encoder, self.lxrt_optimizer)]
         for param in all_tuple:
             create_state(*param)
         torch.save(states, path)
@@ -848,9 +884,8 @@ class Seq2SeqAgent(BaseAgent):
             model.load_state_dict(state)
             if args.loadOptim:
                 optimizer.load_state_dict(states[name]['optimizer'])
-        all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
-                     ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer)]
+        all_tuple = [("critic", self.critic, self.critic_optimizer),
+                     ("lxrt_encoder", self.lxrt_encoder, self.lxrt_optimizer)]
         for param in all_tuple:
             recover_state(*param)
         return states['encoder']['epoch'] - 1
