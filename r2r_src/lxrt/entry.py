@@ -84,7 +84,7 @@ class LXRTEncoder(nn.Module):
         self.max_seq_length = args.max_seq_length
         set_visual_config(args)
         self.action_embedding = nn.Sequential(
-            nn.Linear(args.angle_feat_size, args.hidden_size),
+            nn.Linear(args.angle_feat_size, int(args.hidden_size/2)),
             nn.Tanh()
         )
         self.action_drop = nn.Dropout(p=args.dropout)
@@ -96,26 +96,24 @@ class LXRTEncoder(nn.Module):
         )
 
         # Build LXRT Model
-        # self.model = VisualBertForLXRFeature.from_pretrained(
-        #     "bert-base-uncased",
-        #     mode=mode
-        # )
-        # config_file = "./pytorch_pretrained_bert/bert_config.json"
-        # config = BertConfig.from_json_file(config_file)
-        self.model = VisualBertForLXRFeature(args, mode=mode)
+        self.model = VisualBertForLXRFeature.from_pretrained(
+            "bert-base-uncased",
+            mode=mode
+        )
+        # self.model = VisualBertForLXRFeature(args, mode=mode)
         self.candidate_att_layer = model.SoftDotAttention(args.hidden_size+args.hidden_size, args.feature_size+args.angle_feat_size)
-        if args.from_scratch:
-            print("initializing all the weights")
-            self.model.apply(self.model.init_bert_weights)
-            # TODO init candidate_att_layer
-        model_path = "./pytorch_pretrained_bert/pytorch_model.bin"
-        state_dict = torch.load(model_path)
-        load_state_dict = {}
-        for k,v in self.model.named_parameters():
-            if k in state_dict and k.startswith("bert.embeddings"):
-                print(k)
-                load_state_dict[k]=state_dict[k]
-        self.model.load_state_dict(load_state_dict, strict=False) # shape mismatch
+        # if args.from_scratch:
+        #     print("initializing all the weights")
+        #     self.model.apply(self.model.init_bert_weights)
+        #     # TODO init candidate_att_layer
+        # model_path = "./pytorch_pretrained_bert/pytorch_model.bin"
+        # state_dict = torch.load(model_path)
+        # load_state_dict = {}
+        # for k,v in self.model.named_parameters():
+        #     if k in state_dict and k.startswith("bert.embeddings"):
+        #         print(k)
+        #         load_state_dict[k]=state_dict[k]
+        # self.model.load_state_dict(load_state_dict, strict=False) # shape mismatch
 
     def multi_gpu(self):
         self.model = nn.DataParallel(self.model)

@@ -195,7 +195,7 @@ class Critic(nn.Module):
     def __init__(self):
         super(Critic, self).__init__()
         self.state2value = nn.Sequential(
-            nn.Linear(args.hidden_size, args.hidden_size),
+            nn.Linear(args.critic_hidden_size, args.hidden_size),
             nn.ReLU(),
             nn.Dropout(args.dropout),
             nn.Linear(args.hidden_size, 1),
