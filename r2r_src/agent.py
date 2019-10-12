@@ -103,8 +103,14 @@ class Seq2SeqAgent(BaseAgent):
         self.lxrt_encoder.multi_gpu() # language bert on gpu 0
 
         # Optimizers
+        self.lxrt_optimizer = args.optimizer(
+                [
+                    {"params":self.lxrt_encoder.model.parameters(), "lr":args.lr/10},
+                    {"params":self.lxrt_encoder.candidate_att_layer.parameters()},
+                    {"params":self.lxrt_encoder.action_embedding.parameters()},
+                ])
+        # self.lxrt_encoder.parameters(), lr=args.lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
-        self.lxrt_optimizer = args.optimizer(self.lxrt_encoder.parameters(), lr=args.lr)
         self.optimizers = (self.critic_optimizer, self.lxrt_optimizer)
 
         # Evaluations

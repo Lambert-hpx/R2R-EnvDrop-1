@@ -85,9 +85,9 @@ class LXRTEncoder(nn.Module):
         set_visual_config(args)
         self.action_embedding = nn.Sequential(
             nn.Linear(args.angle_feat_size, int(args.hidden_size/2)),
-            nn.Tanh()
+            nn.Tanh(),
+            nn.Dropout(p=args.dropout)
         )
-        self.action_drop = nn.Dropout(p=args.dropout)
 
         # Using the bert tokenizer
         self.tokenizer = BertTokenizer.from_pretrained(
@@ -116,6 +116,7 @@ class LXRTEncoder(nn.Module):
         # self.model.load_state_dict(load_state_dict, strict=False) # shape mismatch
 
     def multi_gpu(self):
+        self.action_embedding = nn.DataParallel(self.action_embedding)
         self.model = nn.DataParallel(self.model)
         self.candidate_att_layer = nn.DataParallel(self.candidate_att_layer)
 
@@ -153,7 +154,6 @@ class LXRTEncoder(nn.Module):
                 visual_feats=feats,
                 visual_attention_mask=visual_attention_mask)
         action_embeds = self.action_embedding(action)
-        action_embeds = self.action_drop(action_embeds)
         cat_h = torch.cat([h, action_embeds], dim=1)
         # h_drop = self.drop(h) # TODO
         _, logit = self.candidate_att_layer(cat_h, candidate_feat, output_prob=False)
