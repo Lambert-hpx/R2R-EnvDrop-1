@@ -97,10 +97,10 @@ class Seq2SeqAgent(BaseAgent):
 
         # Models
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
-        # self.critic = nn.DataParallel(model.Critic().cuda())
-        self.critic = model.Critic().cuda()
+        self.critic = nn.DataParallel(model.Critic().cuda())
+        # self.critic = model.Critic().cuda()
         self.lxrt_encoder = LXRTEncoder(args).cuda()
-        # self.lxrt_encoder.multi_gpu() # language bert on gpu 0
+        self.lxrt_encoder.multi_gpu() # language bert on gpu 0
 
         # Optimizers
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
@@ -185,7 +185,7 @@ class Seq2SeqAgent(BaseAgent):
         f_t = self._feature_variable(obs)      # Image features from obs
         candidate_feat, candidate_leng = self._candidate_variable1(obs)
 
-        return f_t[:,:,:-4], f_t[:,:,-4:], sent, input_a_t, candidate_feat, candidate_leng, f_t
+        return f_t[:,:,:-args.angle_feat_size], f_t[:,:,-args.angle_feat_size:], sent, input_a_t, candidate_feat, candidate_leng, f_t
 
     def _teacher_action(self, obs, ended):
         """
@@ -336,7 +336,7 @@ class Seq2SeqAgent(BaseAgent):
         for t in range(self.episode_len):
             feat, pos, sent, input_a_t, candidate_feat, candidate_leng, f_t = self.get_input_feat1(perm_obs)
             # logit, h = self.lxrt_encoder(sent, (feat, pos), candidate_feat)
-            logit, h = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos), candidate_feat)
+            logit, h = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos), candidate_feat, input_a_t)
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -436,7 +436,7 @@ class Seq2SeqAgent(BaseAgent):
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
             # _, last_h_ = self.lxrt_encoder(sent, (feat, pos), candidate_feat)
-            _, last_h_ = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos),candidate_feat)
+            _, last_h_ = self.lxrt_encoder.forward_dec(input_ids, input_mask, segment_ids, (feat, pos), candidate_feat, input_a_t)
             rl_loss = 0.
 
             # NOW, A2C!!!
@@ -811,14 +811,13 @@ class Seq2SeqAgent(BaseAgent):
 
     def optim_step(self):
         self.loss.backward()
-
-        torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
-        torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)
-
-        self.encoder_optimizer.step()
-        self.decoder_optimizer.step()
+        torch.nn.utils.clip_grad_norm(self.critic.parameters(), 40.)
+        torch.nn.utils.clip_grad_norm(self.lxrt_encoder.parameters(), 40.)
         self.critic_optimizer.step()
         self.lxrt_optimizer.step()
+        self.critic_optimizer.zero_grad()
+        self.lxrt_optimizer.zero_grad()
+        self.loss = 0
 
     def train(self, n_iters, feedback='teacher', **kwargs):
         ''' Train for a given number of iterations '''
@@ -828,12 +827,10 @@ class Seq2SeqAgent(BaseAgent):
         self.lxrt_encoder.train()
 
         self.losses = []
+        self.critic_optimizer.zero_grad()
+        self.lxrt_optimizer.zero_grad()
+        self.loss = 0
         for iter in range(1, n_iters + 1):
-
-            self.critic_optimizer.zero_grad()
-            self.lxrt_optimizer.zero_grad()
-
-            self.loss = 0
             if feedback == 'teacher':
                 self.feedback = 'teacher'
                 self.rollout(train_ml=args.teacher_weight, train_rl=False, **kwargs)
@@ -841,18 +838,12 @@ class Seq2SeqAgent(BaseAgent):
                 if args.ml_weight != 0:
                     self.feedback = 'teacher'
                     self.rollout(train_ml=args.ml_weight, train_rl=False, **kwargs)
+                    self.optim_step()
                 self.feedback = 'sample'
                 self.rollout(train_ml=None, train_rl=True, **kwargs)
             else:
                 assert False
-
-            self.loss.backward()
-
-            torch.nn.utils.clip_grad_norm(self.critic.parameters(), 40.)
-            torch.nn.utils.clip_grad_norm(self.lxrt_encoder.parameters(), 40.)
-
-            self.critic_optimizer.step()
-            self.lxrt_optimizer.step()
+            self.optim_step()
 
     def save(self, epoch, path):
         ''' Snapshot models '''

@@ -91,6 +91,7 @@ class Param:
         self.parser.add_argument("--max_seq_length", default=40, type=int)
         self.parser.add_argument("--vocab_size", default=30522, type=int)
         self.parser.add_argument("--hidden_size", default=768, type=int)
+        self.parser.add_argument("--bert_emb_hidden_size", default=768, type=int)
         self.parser.add_argument("--num_hidden_layers", default=12, type=int)
         self.parser.add_argument("--num_attention_heads", default=12, type=int)
         self.parser.add_argument("--intermediate_size", default=3072, type=int)

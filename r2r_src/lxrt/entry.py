@@ -83,6 +83,11 @@ class LXRTEncoder(nn.Module):
         super().__init__()
         self.max_seq_length = args.max_seq_length
         set_visual_config(args)
+        self.action_embedding = nn.Sequential(
+            nn.Linear(args.angle_feat_size, args.hidden_size),
+            nn.Tanh()
+        )
+        self.action_drop = nn.Dropout(p=args.dropout)
 
         # Using the bert tokenizer
         self.tokenizer = BertTokenizer.from_pretrained(
@@ -98,19 +103,19 @@ class LXRTEncoder(nn.Module):
         # config_file = "./pytorch_pretrained_bert/bert_config.json"
         # config = BertConfig.from_json_file(config_file)
         self.model = VisualBertForLXRFeature(args, mode=mode)
-        self.candidate_att_layer = model.SoftDotAttention(args.hidden_size, args.feature_size+args.angle_feat_size)
+        self.candidate_att_layer = model.SoftDotAttention(args.hidden_size+args.hidden_size, args.feature_size+args.angle_feat_size)
         if args.from_scratch:
             print("initializing all the weights")
             self.model.apply(self.model.init_bert_weights)
             # TODO init candidate_att_layer
-        # model_path = "./pytorch_pretrained_bert/pytorch_model.bin"
-        # state_dict = torch.load(model_path)
-        # load_state_dict = {}
-        # for k,v in self.model.named_parameters():
-        #     if k in state_dict:
-        #         print(k)
-        #         load_state_dict[k]=state_dict[k]
-        # self.model.load_state_dict(load_state_dict, strict=False) shape mismatch
+        model_path = "./pytorch_pretrained_bert/pytorch_model.bin"
+        state_dict = torch.load(model_path)
+        load_state_dict = {}
+        for k,v in self.model.named_parameters():
+            if k in state_dict and k.startswith("bert.embeddings"):
+                print(k)
+                load_state_dict[k]=state_dict[k]
+        self.model.load_state_dict(load_state_dict, strict=False) # shape mismatch
 
     def multi_gpu(self):
         self.model = nn.DataParallel(self.model)
@@ -144,15 +149,17 @@ class LXRTEncoder(nn.Module):
         segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long).cuda()
         return input_ids, input_mask, segment_ids
 
-    def forward_dec(self, input_ids, input_mask, segment_ids, feats, candidate_feat, visual_attention_mask=None):
+    def forward_dec(self, input_ids, input_mask, segment_ids, feats, candidate_feat, action, visual_attention_mask=None):
+        feat, pos = feats
         h = self.model(input_ids, segment_ids, input_mask,
                 visual_feats=feats,
                 visual_attention_mask=visual_attention_mask)
+        action_embeds = self.action_embedding(action)
+        action_embeds = self.action_drop(action_embeds)
+        cat_h = torch.cat([h, action_embeds], dim=1)
         # h_drop = self.drop(h) # TODO
-        _, logit = self.candidate_att_layer(h, candidate_feat, output_prob=False)
+        _, logit = self.candidate_att_layer(cat_h, candidate_feat, output_prob=False)
         return logit, h
-
-
 
     def save(self, path):
         torch.save(self.model.state_dict(),
