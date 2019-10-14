@@ -31,7 +31,7 @@ class BaseAgent(object):
         random.seed(1)
         self.results = {}
         self.losses = [] # For learning agents
-    
+
     def write_results(self):
         output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
@@ -96,8 +96,11 @@ class Seq2SeqAgent(BaseAgent):
 
         # Models
         enc_hidden_size = args.rnn_dim//2 if args.bidir else args.rnn_dim
-        self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
-                                         args.dropout, bidirectional=args.bidir).cuda()
+        # self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
+        #                                  args.dropout, bidirectional=args.bidir).cuda()
+        # encode with bert
+        self.encoder = model.BertEncoder().cuda()
+
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.critic = model.Critic().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
@@ -156,14 +159,16 @@ class Seq2SeqAgent(BaseAgent):
 
     def get_input_feat(self, obs):
         input_a_t = np.zeros((len(obs), args.angle_feat_size), np.float32)
+        sents=[]
         for i, ob in enumerate(obs):
             input_a_t[i] = utils.angle_feature(ob['heading'], ob['elevation'])
+            sents.append(ob['instructions'])
         input_a_t = torch.from_numpy(input_a_t).cuda()
 
         f_t = self._feature_variable(obs)      # Image features from obs
         candidate_feat, candidate_leng = self._candidate_variable(obs)
 
-        return input_a_t, f_t, candidate_feat, candidate_leng
+        return input_a_t, f_t, candidate_feat, candidate_leng, sents
 
     def _teacher_action(self, obs, ended):
         """
@@ -188,7 +193,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def make_equiv_action(self, a_t, perm_obs, perm_idx=None, traj=None):
         """
-        Interface between Panoramic view and Egocentric view 
+        Interface between Panoramic view and Egocentric view
         It will convert the action panoramic view action a_t to equivalent egocentric view actions for the simulator
         """
         def take_action(i, idx, name):
@@ -263,9 +268,11 @@ class Seq2SeqAgent(BaseAgent):
         # Reorder the language input for the encoder (do not ruin the original code)
         seq, seq_mask, seq_lengths, perm_idx = self._sort_batch(obs)
         perm_obs = obs[perm_idx]
+        input_a_t, f_t, candidate_feat, candidate_leng, sents = self.get_input_feat(perm_obs)
+        ctx, ctx_mask, h_t, c_t = self.encoder(sents)
 
-        ctx, h_t, c_t = self.encoder(seq, seq_lengths)
-        ctx_mask = seq_mask
+        # ctx, h_t, c_t = self.encoder(seq, seq_lengths)
+        # ctx_mask = seq_mask
 
         # Init the reward shaping
         last_dist = np.zeros(batch_size, np.float32)
@@ -295,7 +302,7 @@ class Seq2SeqAgent(BaseAgent):
         h1 = h_t
         for t in range(self.episode_len):
 
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_leng, sents = self.get_input_feat(perm_obs)
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -325,7 +332,7 @@ class Seq2SeqAgent(BaseAgent):
             # Determine next model inputs
             if self.feedback == 'teacher':
                 a_t = target                # teacher forcing
-            elif self.feedback == 'argmax': 
+            elif self.feedback == 'argmax':
                 _, a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
                 log_probs = F.log_softmax(logit, 1)                              # Calculate the log_prob here
@@ -386,12 +393,12 @@ class Seq2SeqAgent(BaseAgent):
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
 
             # Early exit if all ended
-            if ended.all(): 
+            if ended.all():
                 break
 
         if train_rl:
             # Last action in A2C
-            input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
+            input_a_t, f_t, candidate_feat, candidate_leng, sents = self.get_input_feat(perm_obs)
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
@@ -588,7 +595,7 @@ class Seq2SeqAgent(BaseAgent):
                     continue
                 for j in range(len(ob['candidate']) + 1):               # +1 to include the <end> action
                     # score + log_prob[action]
-                    modified_log_prob = log_probs[i][j].detach().cpu().item() 
+                    modified_log_prob = log_probs[i][j].detach().cpu().item()
                     new_score = current_state['score'] + modified_log_prob
                     if j < len(candidate):                        # A normal action
                         next_id = make_state_id(current_viewpoint, j)
@@ -813,7 +820,7 @@ class Seq2SeqAgent(BaseAgent):
             torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
             torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)
 
-            self.encoder_optimizer.step()
+            self.encoder_optimizer.step() # not update bert
             self.decoder_optimizer.step()
             self.critic_optimizer.step()
 

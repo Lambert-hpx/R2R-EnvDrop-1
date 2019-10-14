@@ -5,13 +5,55 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from param import args
+from transformers import BertModel, BertTokenizer
+
+
+class BertEncoder(nn.Module):
+    def __init__(self):
+        super(BertEncoder, self).__init__()
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        self.model = BertModel.from_pretrained('/home/zhufengda/pytorch_pretrained_bert')
+        self.f1 = nn.Linear(768, args.rnn_dim)
+        self.f2 = nn.Linear(768, args.rnn_dim)
+
+    def forward(self, sents):
+        """input: a list of sentences"""
+        def pad_up(input_ids, max_length):
+            padding_length = max_length - len(input_ids)
+            attention_mask = ([0] * len(input_ids)) + [1] * padding_length
+            input_ids = input_ids + ([0] * padding_length)
+            return (input_ids, attention_mask)
+        all_input_ids = []
+        max_batch_len = 0
+
+        for sent in sents:
+            input_ids = self.tokenizer.encode(sent, add_special_tokens=True)
+            all_input_ids.append(input_ids)
+            max_batch_len = max(max_batch_len, len(input_ids))
+
+        all_input_ids, all_attention_masks = zip(*[
+            pad_up(input_ids, max_batch_len) for input_ids in all_input_ids
+        ])
+        ctx_mask = torch.tensor(all_attention_masks,  dtype=torch.long).cuda()
+        inputs_dict = {
+            'input_ids': torch.tensor(all_input_ids,  dtype=torch.long).cuda(),
+            'attention_mask': ctx_mask
+        }
+        with torch.no_grad():
+            last_hidden_states = self.model(**inputs_dict)[0]  # Models outputs are now tuples
+        ctx = self.f1(last_hidden_states)
+        ctx_mask = ctx_mask.bool()
+        h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        c_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        return ctx, ctx_mask, h_t, c_t
+
 
 
 class EncoderLSTM(nn.Module):
     ''' Encodes navigation instructions, returning hidden state context (for
         attention methods) and a decoder initial state. '''
 
-    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx, 
+    def __init__(self, vocab_size, embedding_size, hidden_size, padding_idx,
                             dropout_ratio, bidirectional=False, num_layers=1):
         super(EncoderLSTM, self).__init__()
         self.embedding_size = embedding_size
@@ -24,7 +66,7 @@ class EncoderLSTM(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_size, padding_idx)
         input_size = embedding_size
         self.lstm = nn.LSTM(input_size, hidden_size, self.num_layers,
-                            batch_first=True, dropout=dropout_ratio, 
+                            batch_first=True, dropout=dropout_ratio,
                             bidirectional=bidirectional)
         self.encoder2decoder = nn.Linear(hidden_size * self.num_directions,
             hidden_size * self.num_directions
@@ -47,7 +89,7 @@ class EncoderLSTM(nn.Module):
         return h0.cuda(), c0.cuda()
 
     def forward(self, inputs, lengths):
-        ''' Expects input vocab indices as (batch, seq_len). Also requires a 
+        ''' Expects input vocab indices as (batch, seq_len). Also requires a
             list of lengths for dynamic batching. '''
         embeds = self.embedding(inputs)  # (batch, seq_len, embedding_size)
         embeds = self.drop(embeds)
@@ -81,7 +123,7 @@ class EncoderLSTM(nn.Module):
 
 
 class SoftDotAttention(nn.Module):
-    '''Soft Dot Attention. 
+    '''Soft Dot Attention.
 
     Ref: http://www.aclweb.org/anthology/D15-1166
     Adapted from PyTorch OPEN NMT.
