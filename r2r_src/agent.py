@@ -106,7 +106,7 @@ class Seq2SeqAgent(BaseAgent):
         self.models = (self.encoder, self.decoder, self.critic)
 
         # Optimizers
-        self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
+        self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr/10)
         self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
         self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer)

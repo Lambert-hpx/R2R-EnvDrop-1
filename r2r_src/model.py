@@ -41,7 +41,7 @@ class BertEncoder(nn.Module):
             'attention_mask': all_attention_masks
         }
         with torch.no_grad():
-            last_hidden_states = self.model(**inputs_dict)[0]  # Models outputs are now tuples
+            last_hidden_states, pooled_output = self.model(**inputs_dict) # Models outputs are now tuples
         ctx = self.f1(last_hidden_states)
         ctx_mask = (1-all_attention_masks).bool()
         # h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
