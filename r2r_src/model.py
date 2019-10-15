@@ -189,12 +189,10 @@ class AttnDecoderLSTM(nn.Module):
         # self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
         self.mem_att_layer = SoftDotAttention(hidden_size, hidden_size)
-        self.attention_layer = SoftDotAttention(embedding_size+hidden_size, hidden_size)
+        self.attention_layer = SoftDotAttention(hidden_size*2, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.fc1 = nn.Linear(78464, hidden_size)
+        self.fc1 = nn.Linear(embedding_size+feature_size, hidden_size)
         self.relu1 = nn.LeakyReLU()
-        self.fc2 = nn.Linear(feature_size, hidden_size)
-        self.relu2 = nn.LeakyReLU()
         self.memory=[]
 
     def empty_memory(self):
@@ -203,10 +201,13 @@ class AttnDecoderLSTM(nn.Module):
     def extract_memory(self):
         return torch.cat(self.memory, dim=1)
 
-    def update_memory(self, action, feature):
-        bs, l, dim = feature.shape
-        feature = feature.view(bs, l*dim)
-        feature = torch.cat((feature, action), dim=1).unsqueeze(1)
+    # def update_memory(self, action, feature):
+    #     bs, l, dim = feature.shape
+    #     feature = feature.view(bs, l*dim)
+    #     feature = torch.cat((feature, action), dim=1).unsqueeze(1)
+    #     self.memory.append(feature)
+
+    def update_memory(self, feature):
         self.memory.append(feature)
 
     def forward(self, action, feature, cand_feat, h1, ctx, ctx_mask=None,
@@ -234,21 +235,21 @@ class AttnDecoderLSTM(nn.Module):
 
         h1_drop = self.drop(h1)
         attn_feat, _ = self.feat_att_layer(h1_drop, feature, output_tilde=False)
-        attn_feat = self.relu2(self.fc2(attn_feat))
+        # attn_feat = self.relu2(self.fc2(attn_feat))
+        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+        concat_input = self.relu1(self.fc1(concat_input))
         if len(self.memory)>0:
             memory_ft = self.extract_memory()
-            memory_ft = self.relu1(self.fc1(memory_ft))
-            attn_feat_drop = self.drop(attn_feat)
-            mem_attn_feat, _ = self.mem_att_layer(attn_feat_drop, memory_ft, output_tilde=False)
-            mem_attn_feat_drop = self.drop(mem_attn_feat)
-            attn_feat += mem_attn_feat_drop
-
-        # concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-        # h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
-        h_1 = torch.cat((action_embeds, attn_feat), 1)
-
-        h_1_drop = self.drop(h_1)
-        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask, output_tilde=False)
+            concat_input_drop = self.drop(concat_input)
+            memory_ft_drop = self.drop(memory_ft)
+            mem_attn_feat, _ = self.mem_att_layer(concat_input_drop, memory_ft_drop, output_tilde=False)
+            # concat_input += mem_attn_feat # mem exp_004
+            memory_output = torch.cat((concat_input, mem_attn_feat), dim=1)
+        else:
+            memory_output = torch.cat((concat_input, torch.zeros_like(concat_input)), dim=1)
+        self.update_memory(concat_input.unsqueeze(1))
+        memory_output_drop = self.drop(memory_output)
+        h_tilde, alpha = self.attention_layer(memory_output_drop, ctx, ctx_mask, output_tilde=False)
 
         # Adding Dropout
         h_tilde_drop = self.drop(h_tilde)
@@ -257,8 +258,6 @@ class AttnDecoderLSTM(nn.Module):
             cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
 
         _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
-        self.update_memory(action, feature)
-
         return logit, h_tilde
 
 
