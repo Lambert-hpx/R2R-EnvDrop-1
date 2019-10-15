@@ -14,13 +14,14 @@ class BertEncoder(nn.Module):
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.model = BertModel.from_pretrained('/home/zhufengda/pytorch_pretrained_bert')
         self.f1 = nn.Linear(768, args.rnn_dim)
+        self.relu2 = nn.LeakyReLU()
         self.f2 = nn.Linear(768, args.rnn_dim)
 
     def forward(self, sents):
         """input: a list of sentences"""
         def pad_up(input_ids, max_length):
             padding_length = max_length - len(input_ids)
-            attention_mask = ([0] * len(input_ids)) + [1] * padding_length
+            attention_mask = ([1] * len(input_ids)) + [0] * padding_length
             input_ids = input_ids + ([0] * padding_length)
             return (input_ids, attention_mask)
         all_input_ids = []
@@ -34,17 +35,19 @@ class BertEncoder(nn.Module):
         all_input_ids, all_attention_masks = zip(*[
             pad_up(input_ids, max_batch_len) for input_ids in all_input_ids
         ])
-        ctx_mask = torch.tensor(all_attention_masks,  dtype=torch.long).cuda()
+        all_attention_masks = torch.tensor(all_attention_masks,  dtype=torch.long).cuda()
         inputs_dict = {
             'input_ids': torch.tensor(all_input_ids,  dtype=torch.long).cuda(),
-            'attention_mask': ctx_mask
+            'attention_mask': all_attention_masks
         }
         with torch.no_grad():
             last_hidden_states = self.model(**inputs_dict)[0]  # Models outputs are now tuples
         ctx = self.f1(last_hidden_states)
-        ctx_mask = ctx_mask.bool()
-        h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
-        c_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        ctx_mask = (1-all_attention_masks).bool()
+        # h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        # c_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        c_t = self.relu2(self.f1(pooled_output))
+        h_t = nn.Tanh()(self.f2(pooled_output))
         return ctx, ctx_mask, h_t, c_t
 
 
