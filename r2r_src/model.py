@@ -14,13 +14,14 @@ class BertEncoder(nn.Module):
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.model = BertModel.from_pretrained('/home/zhufengda/pytorch_pretrained_bert')
         self.f1 = nn.Linear(768, args.rnn_dim)
-        self.f2 = nn.Linear(768, args.rnn_dim)
+        self.relu2 = nn.LeakyReLU()
+        self.f2 = nn.Linear(args.rnn_dim, args.rnn_dim)
 
     def forward(self, sents):
         """input: a list of sentences"""
         def pad_up(input_ids, max_length):
             padding_length = max_length - len(input_ids)
-            attention_mask = ([0] * len(input_ids)) + [1] * padding_length
+            attention_mask = ([1] * len(input_ids)) + [0] * padding_length
             input_ids = input_ids + ([0] * padding_length)
             return (input_ids, attention_mask)
         all_input_ids = []
@@ -34,17 +35,19 @@ class BertEncoder(nn.Module):
         all_input_ids, all_attention_masks = zip(*[
             pad_up(input_ids, max_batch_len) for input_ids in all_input_ids
         ])
-        ctx_mask = torch.tensor(all_attention_masks,  dtype=torch.long).cuda()
+        all_attention_masks = torch.tensor(all_attention_masks,  dtype=torch.long).cuda()
         inputs_dict = {
             'input_ids': torch.tensor(all_input_ids,  dtype=torch.long).cuda(),
-            'attention_mask': ctx_mask
+            'attention_mask': all_attention_masks
         }
         with torch.no_grad():
-            last_hidden_states = self.model(**inputs_dict)[0]  # Models outputs are now tuples
+            last_hidden_states, pooled_output = self.model(**inputs_dict)  # Models outputs are now tuples
         ctx = self.f1(last_hidden_states)
-        ctx_mask = ctx_mask.bool()
-        h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
-        c_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        ctx_mask = (1-all_attention_masks).bool() # due to different definition
+        # h_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        # c_t = torch.zeros(args.batchSize, args.rnn_dim).cuda()
+        c_t = self.relu2(self.f1(pooled_output))
+        h_t = nn.Tanh()(self.f2(c_t))
         return ctx, ctx_mask, h_t, c_t
 
 
@@ -183,14 +186,30 @@ class AttnDecoderLSTM(nn.Module):
         )
         self.drop = nn.Dropout(p=dropout_ratio)
         self.drop_env = nn.Dropout(p=args.featdropout)
-        self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
+        # self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.attention_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.mem_att_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.attention_layer = SoftDotAttention(embedding_size+hidden_size, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.fc1 = nn.Linear(78464, hidden_size)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(feature_size, hidden_size)
+        self.relu2 = nn.LeakyReLU()
+        self.memory=[]
 
-    def forward(self, action, feature, cand_feat,
-                h_0, prev_h1, c_0,
-                ctx, ctx_mask=None,
+    def empty_memory(self):
+        self.memory = []
+
+    def extract_memory(self):
+        return torch.cat(self.memory, dim=1)
+
+    def update_memory(self, action, feature):
+        bs, l, dim = feature.shape
+        feature = feature.view(bs, l*dim)
+        feature = torch.cat((feature, action), dim=1).unsqueeze(1)
+        self.memory.append(feature)
+
+    def forward(self, action, feature, cand_feat, h1, ctx, ctx_mask=None,
                 already_dropfeat=False):
         '''
         Takes a single step in the decoder LSTM (allowing sampling).
@@ -213,14 +232,23 @@ class AttnDecoderLSTM(nn.Module):
             # Dropout the raw feature as a common regularization
             feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
 
-        prev_h1_drop = self.drop(prev_h1)
-        attn_feat, _ = self.feat_att_layer(prev_h1_drop, feature, output_tilde=False)
+        h1_drop = self.drop(h1)
+        attn_feat, _ = self.feat_att_layer(h1_drop, feature, output_tilde=False)
+        attn_feat = self.relu2(self.fc2(attn_feat))
+        if len(self.memory)>0:
+            memory_ft = self.extract_memory()
+            memory_ft = self.relu1(self.fc1(memory_ft))
+            attn_feat_drop = self.drop(attn_feat)
+            mem_attn_feat, _ = self.mem_att_layer(attn_feat_drop, memory_ft, output_tilde=False)
+            mem_attn_feat_drop = self.drop(mem_attn_feat)
+            attn_feat += mem_attn_feat_drop
 
-        concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
-        h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+        # concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
+        # h_1, c_1 = self.lstm(concat_input, (prev_h1, c_0))
+        h_1 = torch.cat((action_embeds, attn_feat), 1)
 
         h_1_drop = self.drop(h_1)
-        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask)
+        h_tilde, alpha = self.attention_layer(h_1_drop, ctx, ctx_mask, output_tilde=False)
 
         # Adding Dropout
         h_tilde_drop = self.drop(h_tilde)
@@ -229,8 +257,9 @@ class AttnDecoderLSTM(nn.Module):
             cand_feat[..., :-args.angle_feat_size] = self.drop_env(cand_feat[..., :-args.angle_feat_size])
 
         _, logit = self.candidate_att_layer(h_tilde_drop, cand_feat, output_prob=False)
+        self.update_memory(action, feature)
 
-        return h_1, c_1, logit, h_tilde
+        return logit, h_tilde
 
 
 class Critic(nn.Module):

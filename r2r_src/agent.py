@@ -300,19 +300,17 @@ class Seq2SeqAgent(BaseAgent):
         ml_loss = 0.
 
         h1 = h_t
+        self.decoder.empty_memory()
         for t in range(self.episode_len):
-
             input_a_t, f_t, candidate_feat, candidate_leng, sents = self.get_input_feat(perm_obs)
             if speaker is not None:       # Apply the env drop mask to the feat
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
 
-            h_t, c_t, logit, h1 = self.decoder(input_a_t, f_t, candidate_feat,
-                                               h_t, h1, c_t,
-                                               ctx, ctx_mask,
-                                               already_dropfeat=(speaker is not None))
+            logit, h1 = self.decoder(input_a_t, f_t, candidate_feat,
+                h1, ctx, ctx_mask, already_dropfeat=(speaker is not None))
 
-            hidden_states.append(h_t)
+            hidden_states.append(h1)
 
             # Mask outputs where agent can't move forward
             # Here the logit is [b, max_candidate]
@@ -402,10 +400,8 @@ class Seq2SeqAgent(BaseAgent):
             if speaker is not None:
                 candidate_feat[..., :-args.angle_feat_size] *= noise
                 f_t[..., :-args.angle_feat_size] *= noise
-            last_h_, _, _, _ = self.decoder(input_a_t, f_t, candidate_feat,
-                                            h_t, h1, c_t,
-                                            ctx, ctx_mask,
-                                            speaker is not None)
+            _, last_h_ = self.decoder(input_a_t, f_t, candidate_feat,
+                h1, ctx, ctx_mask, speaker is not None)
             rl_loss = 0.
 
             # NOW, A2C!!!
@@ -797,7 +793,6 @@ class Seq2SeqAgent(BaseAgent):
 
         self.losses = []
         for iter in range(1, n_iters + 1):
-
             self.encoder_optimizer.zero_grad()
             self.decoder_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
