@@ -188,8 +188,8 @@ class AttnDecoderLSTM(nn.Module):
         self.drop_env = nn.Dropout(p=args.featdropout)
         # self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.mem_att_layer = SoftDotAttention(hidden_size, hidden_size)
-        self.attention_layer = SoftDotAttention(hidden_size*2, hidden_size)
+        self.mem_att_layer = SoftDotAttention(hidden_size*2, hidden_size*2)
+        self.attention_layer = SoftDotAttention(hidden_size*4, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
         self.fc1 = nn.Linear(embedding_size+feature_size, hidden_size)
         self.relu1 = nn.LeakyReLU()
@@ -225,7 +225,6 @@ class AttnDecoderLSTM(nn.Module):
         already_dropfeat: used in EnvDrop
         '''
         action_embeds = self.embedding(action)
-
         # Adding Dropout
         action_embeds = self.drop(action_embeds)
 
@@ -233,11 +232,13 @@ class AttnDecoderLSTM(nn.Module):
             # Dropout the raw feature as a common regularization
             feature[..., :-args.angle_feat_size] = self.drop_env(feature[..., :-args.angle_feat_size])   # Do not drop the last args.angle_feat_size (position feat)
 
-        h1_drop = self.drop(h1)
-        attn_feat, _ = self.feat_att_layer(h1_drop, feature, output_tilde=False)
+        h1_drop1 = self.drop(h1)
+        h1_drop2 = self.drop(h1)
+        attn_feat, _ = self.feat_att_layer(h1_drop1, feature, output_tilde=False)
         # attn_feat = self.relu2(self.fc2(attn_feat))
         concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
         concat_input = self.relu1(self.fc1(concat_input))
+        concat_input = torch.cat((h1_drop2, concat_input), 1) # enhance in mem_006
         if len(self.memory)>0:
             memory_ft = self.extract_memory()
             concat_input_drop = self.drop(concat_input)
