@@ -62,6 +62,11 @@ class Param:
 
         # Model hyper params:
         self.parser.add_argument('--rnnDim', dest="rnn_dim", type=int, default=512)
+        self.parser.add_argument('--hidden_size', type=int, default=512)
+        self.parser.add_argument('--num_attention_heads', type=int, default=8)
+        self.parser.add_argument('--output_attentions', type=bool, default=False)
+        self.parser.add_argument('--attention_probs_dropout_prob', type=float, default=0.5)
+        self.parser.add_argument('--transformer_num', type=int, default=1)
         self.parser.add_argument('--wemb', type=int, default=256)
         self.parser.add_argument('--aemb', type=int, default=64)
         self.parser.add_argument('--proj', type=int, default=512)

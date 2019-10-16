@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from param import args
 from transformers import BertModel, BertTokenizer
+from bert_models import BertSelfAttention
 
 
 class BertEncoder(nn.Module):
@@ -141,7 +142,7 @@ class SoftDotAttention(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, h, context, mask=None,
-                output_tilde=True, output_prob=True):
+                output_tilde=True, output_prob=True, print_attn=False):
         '''Propagate h through the network.
 
         h: batch x dim
@@ -158,6 +159,8 @@ class SoftDotAttention(nn.Module):
             # -Inf masking prior to the softmax
             attn.masked_fill_(mask, -float('inf'))
         attn = self.sm(attn)    # There will be a bug here, but it's actually a problem in torch source code.
+        if print_attn:
+            print(attn[0].cpu().numpy())
         attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
 
         weighted_context = torch.bmm(attn3, context).squeeze(1)  # batch x dim
@@ -188,9 +191,12 @@ class AttnDecoderLSTM(nn.Module):
         self.drop_env = nn.Dropout(p=args.featdropout)
         # self.lstm = nn.LSTMCell(embedding_size+feature_size, hidden_size)
         self.feat_att_layer = SoftDotAttention(hidden_size, feature_size)
-        self.mem_att_layer = SoftDotAttention(hidden_size*2, hidden_size*2)
-        self.attention_layer = SoftDotAttention(hidden_size*4, hidden_size)
+        self.mem_att_layer = SoftDotAttention(hidden_size, hidden_size)
+        self.attention_layer = SoftDotAttention(hidden_size*2, hidden_size)
         self.candidate_att_layer = SoftDotAttention(hidden_size, feature_size)
+        self.mem_transformer = nn.ModuleList(
+                [BertSelfAttention(args) for i in range(args.transformer_num)]
+                )
         self.fc1 = nn.Linear(embedding_size+feature_size, hidden_size)
         self.relu1 = nn.LeakyReLU()
         self.memory=[]
@@ -238,11 +244,13 @@ class AttnDecoderLSTM(nn.Module):
         # attn_feat = self.relu2(self.fc2(attn_feat))
         concat_input = torch.cat((action_embeds, attn_feat), 1) # (batch, embedding_size+feature_size)
         concat_input = self.relu1(self.fc1(concat_input))
-        concat_input = torch.cat((h1_drop2, concat_input), 1) # enhance in mem_006
+        # concat_input = torch.cat((h1_drop2, concat_input), 1) # enhance in mem_006
         if len(self.memory)>0:
             memory_ft = self.extract_memory()
             concat_input_drop = self.drop(concat_input)
             memory_ft_drop = self.drop(memory_ft)
+            for mem_transformer in self.mem_transformer:
+                memory_ft_drop = mem_transformer(memory_ft_drop)
             mem_attn_feat, _ = self.mem_att_layer(concat_input_drop, memory_ft_drop, output_tilde=False)
             # concat_input += mem_attn_feat # mem exp_004
             memory_output = torch.cat((concat_input, mem_attn_feat), dim=1)
