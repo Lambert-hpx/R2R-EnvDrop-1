@@ -907,7 +907,7 @@ class Seq2SeqAgent(BaseAgent):
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
                      ("critic", self.critic, self.critic_optimizer),
-                     # ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
+                     ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
                      ]
         for param in all_tuple:
             recover_state(*param)
