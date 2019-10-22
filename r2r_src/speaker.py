@@ -198,13 +198,6 @@ class Speaker():
         else:
             return (img_feats, can_feats), length
 
-    def gt_words(self, obs):
-        """
-        See "utils.Tokenizer.encode_sentence(...)" for "instr_encoding" details
-        """
-        seq_tensor = np.array([ob['instr_encoding'] for ob in obs])
-        return torch.from_numpy(seq_tensor).cuda()
-
     def teacher_forcing(self, train=True, features=None, insts=None, for_listener=False):
         if train:
             self.encoder.train()
@@ -231,7 +224,7 @@ class Speaker():
 
         # Get Language Input
         if insts is None:
-            insts = self.gt_words(obs)                                       # Language Feature
+            insts = utils.gt_words(obs)                                       # Language Feature
 
         # Decode
         logits, _, _ = self.decoder(insts, ctx, ctx_mask, h_t, c_t)

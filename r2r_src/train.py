@@ -161,13 +161,17 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
         total = max(sum(listner.logs['total']), 1)
         length = max(len(listner.logs['critic_loss']), 1)
         critic_loss = sum(listner.logs['critic_loss']) / total #/ length / args.batchSize
+        aux_loss = sum(listner.logs['aux_loss']) / total #/ length / args.batchSize
         entropy = sum(listner.logs['entropy']) / total #/ length / args.batchSize
         predict_loss = sum(listner.logs['us_loss']) / max(len(listner.logs['us_loss']), 1)
+
         writer.add_scalar("loss/critic", critic_loss, idx)
+        writer.add_scalar("loss/aux", aux_loss, idx)
         writer.add_scalar("policy_entropy", entropy, idx)
         writer.add_scalar("loss/unsupervised", predict_loss, idx)
         writer.add_scalar("total_actions", total, idx)
         writer.add_scalar("max_length", length, idx)
+        writer.add_scalar("loss/critic", critic_loss, idx)
         print("total_actions", total)
         print("max_length", length)
 

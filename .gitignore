@@ -3,3 +3,5 @@
 *.zip
 /r2r_src/.idea
 /img_features
+run/
+tasks/R2R/data/

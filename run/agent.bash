@@ -1,4 +1,5 @@
-name=agent
+name=$(echo $0 | awk -F'/' '{print $NF}' | awk -F'.' '{print $1}')
+echo $name
 flag="--attn soft --train listener 
       --featdropout 0.3
       --angleFeatSize 128

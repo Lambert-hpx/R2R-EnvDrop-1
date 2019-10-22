@@ -31,7 +31,7 @@ class BaseAgent(object):
         random.seed(1)
         self.results = {}
         self.losses = [] # For learning agents
-    
+
     def write_results(self):
         output = [{'instr_id':k, 'trajectory': v} for k,v in self.results.items()]
         with open(self.results_path, 'w') as f:
@@ -64,7 +64,18 @@ class BaseAgent(object):
                     self.results[traj['instr_id']] = traj['path']
         else:   # Do a full round
             while True:
-                for traj in self.rollout(**kwargs):
+                for i in range(args.test_train_num):
+                    self.zero_grad()
+                    if i == 0:
+                        self.rollout(**kwargs)
+                    else:
+                        self.rollout(test_train=True, **kwargs)
+                    # self.test_train_optim_step()
+
+                self.encoder.eval()
+                self.decoder.eval()
+                self.critic.eval()
+                for traj in self.rollout(test_train=True, **kwargs):
                     if traj['instr_id'] in self.results:
                         looped = True
                     else:
@@ -99,14 +110,20 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder = model.EncoderLSTM(tok.vocab_size(), args.wemb, enc_hidden_size, padding_idx,
                                          args.dropout, bidirectional=args.bidir).cuda()
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
+        self.speaker_decoder = model.SpeakerDecoder(self.tok.vocab_size(), args.wemb, self.tok.word_to_index['<PAD>'], args.rnn_dim, args.dropout).cuda()
         self.critic = model.Critic().cuda()
-        self.models = (self.encoder, self.decoder, self.critic)
+        self.models = (self.encoder, self.decoder, self.critic, self.speaker_decoder)
+        self.softmax_loss = torch.nn.CrossEntropyLoss(ignore_index=self.tok.word_to_index['<PAD>'])
 
         # Optimizers
         self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
+        self.encoder_optimizer1 = args.optimizer(self.encoder.parameters(), lr=args.tt_lr)
         self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
+        self.decoder_optimizer1 = args.optimizer(self.decoder.parameters(), lr=args.tt_lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
-        self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer)
+        self.speaker_decoder_optimizer = args.optimizer(self.speaker_decoder.parameters(), lr=args.lr)
+        self.speaker_decoder_optimizer1 = args.optimizer(self.speaker_decoder.parameters(), lr=args.tt_lr)
+        self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer, self.speaker_decoder_optimizer)
 
         # Evaluations
         self.losses = []
@@ -188,7 +205,7 @@ class Seq2SeqAgent(BaseAgent):
 
     def make_equiv_action(self, a_t, perm_obs, perm_idx=None, traj=None):
         """
-        Interface between Panoramic view and Egocentric view 
+        Interface between Panoramic view and Egocentric view
         It will convert the action panoramic view action a_t to equivalent egocentric view actions for the simulator
         """
         def take_action(i, idx, name):
@@ -221,7 +238,7 @@ class Seq2SeqAgent(BaseAgent):
                        self.env.env.sims[idx].getState().navigableLocations[select_candidate['idx']].viewpointId
                 take_action(i, idx, select_candidate['idx'])
 
-    def rollout(self, train_ml=None, train_rl=True, reset=True, speaker=None):
+    def rollout(self, train_ml=None, train_rl=True, reset=True, speaker=None, test_train=False):
         """
         :param train_ml:    The weight to train with maximum likelihood
         :param train_rl:    whether use RL in training
@@ -233,10 +250,12 @@ class Seq2SeqAgent(BaseAgent):
         """
         if self.feedback == 'teacher' or self.feedback == 'argmax':
             train_rl = False
-
         if reset:
             # Reset env
-            obs = np.array(self.env.reset())
+            if test_train==False:
+                obs = np.array(self.env.reset())
+            if test_train==True:
+                obs = np.array(self.env.reset(batch=self.env.batch))
         else:
             obs = np.array(self.env._get_obs())
 
@@ -292,6 +311,7 @@ class Seq2SeqAgent(BaseAgent):
         entropys = []
         ml_loss = 0.
 
+        decode_ctx = []
         h1 = h_t
         for t in range(self.episode_len):
 
@@ -304,6 +324,7 @@ class Seq2SeqAgent(BaseAgent):
                                                h_t, h1, c_t,
                                                ctx, ctx_mask,
                                                already_dropfeat=(speaker is not None))
+            decode_ctx.append(h1)
 
             hidden_states.append(h_t)
 
@@ -325,7 +346,7 @@ class Seq2SeqAgent(BaseAgent):
             # Determine next model inputs
             if self.feedback == 'teacher':
                 a_t = target                # teacher forcing
-            elif self.feedback == 'argmax': 
+            elif self.feedback == 'argmax':
                 _, a_t = logit.max(1)        # student forcing - argmax
                 a_t = a_t.detach()
                 log_probs = F.log_softmax(logit, 1)                              # Calculate the log_prob here
@@ -386,7 +407,7 @@ class Seq2SeqAgent(BaseAgent):
             ended[:] = np.logical_or(ended, (cpu_a_t == -1))
 
             # Early exit if all ended
-            if ended.all(): 
+            if ended.all():
                 break
 
         if train_rl:
@@ -441,6 +462,26 @@ class Seq2SeqAgent(BaseAgent):
 
         if train_ml is not None:
             self.loss += ml_loss * train_ml / batch_size
+
+        # auxiliary tasks
+        # speaker recover loss
+        h_t = h_t.unsqueeze(0)
+        c_t = c_t.unsqueeze(0)
+        insts = utils.gt_words(perm_obs)
+        decode_ctx = torch.stack(decode_ctx, dim=1)
+        decode_mask = [torch.tensor(mask) for mask in masks]
+        decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
+        logits, _, _ = self.speaker_decoder(insts, decode_ctx, decode_mask, h_t, c_t)
+        # Because the softmax_loss only allow dim-1 to be logit,
+        # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
+        logits = logits.permute(0, 2, 1).contiguous()
+        aux_loss = self.softmax_loss(
+            input  = logits[:, :, :-1],         # -1 for aligning
+            target = insts[:, 1:]               # "1:" to ignore the word <BOS>
+        )
+        aux_loss = aux_loss*args.aux_speaker_weight
+        self.loss+=aux_loss
+        self.logs['aux_loss'].append(aux_loss.detach())
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
@@ -588,7 +629,7 @@ class Seq2SeqAgent(BaseAgent):
                     continue
                 for j in range(len(ob['candidate']) + 1):               # +1 to include the <end> action
                     # score + log_prob[action]
-                    modified_log_prob = log_probs[i][j].detach().cpu().item() 
+                    modified_log_prob = log_probs[i][j].detach().cpu().item()
                     new_score = current_state['score'] + modified_log_prob
                     if j < len(candidate):                        # A normal action
                         next_id = make_state_id(current_viewpoint, j)
@@ -779,6 +820,17 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder_optimizer.step()
         self.decoder_optimizer.step()
         self.critic_optimizer.step()
+        self.speaker_decoder_optimizer.step()
+
+    def test_train_optim_step(self):
+        self.loss.backward()
+
+        torch.nn.utils.clip_grad_norm(self.encoder.parameters(), 40.)
+        torch.nn.utils.clip_grad_norm(self.decoder.parameters(), 40.)
+
+        # self.encoder_optimizer1.step()
+        self.decoder_optimizer1.step()
+        self.speaker_decoder_optimizer1.step()
 
     def train(self, n_iters, feedback='teacher', **kwargs):
         ''' Train for a given number of iterations '''
@@ -794,6 +846,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder_optimizer.zero_grad()
             self.decoder_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
+            self.speaker_decoder_optimizer.zero_grad()
 
             self.loss = 0
             if feedback == 'teacher':
@@ -816,6 +869,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder_optimizer.step()
             self.decoder_optimizer.step()
             self.critic_optimizer.step()
+            self.speaker_decoder_optimizer.step()
 
     def save(self, epoch, path):
         ''' Snapshot models '''
@@ -830,7 +884,9 @@ class Seq2SeqAgent(BaseAgent):
             }
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer)]
+                     ("critic", self.critic, self.critic_optimizer),
+                     ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
+                     ]
         for param in all_tuple:
             create_state(*param)
         torch.save(states, path)
@@ -850,7 +906,9 @@ class Seq2SeqAgent(BaseAgent):
                 optimizer.load_state_dict(states[name]['optimizer'])
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer)]
+                     ("critic", self.critic, self.critic_optimizer),
+                     # ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
+                     ]
         for param in all_tuple:
             recover_state(*param)
         return states['encoder']['epoch'] - 1

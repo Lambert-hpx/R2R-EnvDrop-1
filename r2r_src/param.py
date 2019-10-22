@@ -77,6 +77,11 @@ class Param:
 
         self.parser.add_argument("--angleFeatSize", dest="angle_feat_size", type=int, default=4)
 
+        # aux loss
+        self.parser.add_argument('--aux_speaker_weight', type=float, default=0.5)
+        self.parser.add_argument('--test_train_num', type=int, default=3)
+        self.parser.add_argument('--tt_lr', type=float, default=1e-4)
+
         # A2C
         self.parser.add_argument("--gamma", default=0.9, type=float)
         self.parser.add_argument("--normalize", dest="normalize_loss", default="total", type=str, help='batch or total')

@@ -20,7 +20,7 @@ csv.field_size_limit(sys.maxsize)
 
 
 class EnvBatch():
-    ''' A simple wrapper for a batch of MatterSim environments, 
+    ''' A simple wrapper for a batch of MatterSim environments,
         using discretized viewpoints and pretrained features '''
 
     def __init__(self, feature_store=None, batch_size=100):
@@ -56,14 +56,14 @@ class EnvBatch():
             self.sims.append(sim)
 
     def _make_id(self, scanId, viewpointId):
-        return scanId + '_' + viewpointId   
+        return scanId + '_' + viewpointId
 
     def newEpisodes(self, scanIds, viewpointIds, headings):
         for i, (scanId, viewpointId, heading) in enumerate(zip(scanIds, viewpointIds, headings)):
             # print("New episode %d" % i)
             # sys.stdout.flush()
             self.sims[i].newEpisode(scanId, viewpointId, heading, 0)
-  
+
     def getStates(self):
         """
         Get list of states augmented with precomputed image features. rgb field will be empty.
@@ -84,7 +84,7 @@ class EnvBatch():
         return feature_states
 
     def makeActions(self, actions):
-        ''' Take an action using the full state dependent action interface (with batched input). 
+        ''' Take an action using the full state dependent action interface (with batched input).
             Every action element should be an (index, heading, elevation) tuple. '''
         for i, (index, heading, elevation) in enumerate(actions):
             self.sims[i].makeAction(index, heading, elevation)
@@ -184,7 +184,7 @@ class R2RBatch():
         self.batch = batch
 
     def reset_epoch(self, shuffle=False):
-        ''' Reset the data index to beginning of epoch. Primarily for testing. 
+        ''' Reset the data index to beginning of epoch. Primarily for testing.
             You must still call reset() for a new episode. '''
         if shuffle:
             random.shuffle(self.data)
