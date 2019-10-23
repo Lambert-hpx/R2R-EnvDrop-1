@@ -111,9 +111,13 @@ class Seq2SeqAgent(BaseAgent):
                                          args.dropout, bidirectional=args.bidir).cuda()
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.speaker_decoder = model.SpeakerDecoder(self.tok.vocab_size(), args.wemb, self.tok.word_to_index['<PAD>'], args.rnn_dim, args.dropout).cuda()
+        states = torch.load("snap/agent_repro/state_dict/best_val_unseen")
+        self.speaker_decoder.load_state_dict(states)
         self.critic = model.Critic().cuda()
         self.progress_indicator = model.ProgressIndicator().cuda()
-        self.models = (self.encoder, self.decoder, self.critic, self.speaker_decoder)
+        self.matching_network = model.MatchingNetwork().cuda()
+        self.models = (self.encoder, self.decoder, self.critic)
+        self.aux_models = (self.speaker_decoder, self.progress_indicator, self.matching_network)
         self.softmax_loss = torch.nn.CrossEntropyLoss(ignore_index=self.tok.word_to_index['<PAD>'])
         self.bce_loss = nn.BCELoss()
 
@@ -123,9 +127,9 @@ class Seq2SeqAgent(BaseAgent):
         self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
         self.decoder_optimizer1 = args.optimizer(self.decoder.parameters(), lr=args.tt_lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
-        self.speaker_decoder_optimizer = args.optimizer(self.speaker_decoder.parameters(), lr=args.lr)
-        self.speaker_decoder_optimizer1 = args.optimizer(self.speaker_decoder.parameters(), lr=args.tt_lr)
-        self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer, self.speaker_decoder_optimizer)
+        self.aux_optimizer = args.optimizer(list(self.speaker_decoder.parameters()) + list(self.progress_indicator.parameters()) + list(self.matching_network.parameters()), lr=args.lr)
+        self.aux_optimizer1 = args.optimizer(self.speaker_decoder.parameters(), lr=args.tt_lr)
+        self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer)
 
         # Evaluations
         self.losses = []
@@ -489,11 +493,24 @@ class Seq2SeqAgent(BaseAgent):
         prob = self.progress_indicator(decode_ctx)
         progress_label = utils.progress_generator(decode_mask)
         aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
-        self.loss += aux_loss2*args.aux_progress_weight
+        aux_loss2 = aux_loss2*args.aux_progress_weight
+        self.loss += aux_loss2
+        self.logs['aux_loss2'].append(aux_loss2.detach())
 
         # aux #3: inst matching
-
-
+        h1 = decode_ctx[:,-1,:]
+        batch_size = h1.shape[0]
+        perm_idx = torch.randperm(batch_size)
+        order_idx = torch.arange(0, batch_size)
+        perm_h1 = h1[perm_idx,:]
+        matching_mask = torch.empty(batch_size).random_(2).bool()
+        same_idx = perm_idx == order_idx
+        label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
+        new_h1 = label * h1 + (1-label) * h1[perm_idx,:]
+        prob = self.matching_network(new_h1)
+        aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
+        self.loss += aux_loss3
+        self.logs['aux_loss3'].append(aux_loss3.detach())
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
@@ -810,6 +827,9 @@ class Seq2SeqAgent(BaseAgent):
         for model, optimizer in zip(self.models, self.optimizers):
             model.train()
             optimizer.zero_grad()
+        for model in self.aux_models:
+            model.train()
+        self.aux_optimizer.zero_grad()
 
     def accumulate_gradient(self, feedback='teacher', **kwargs):
         if feedback == 'teacher':
@@ -832,7 +852,7 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder_optimizer.step()
         self.decoder_optimizer.step()
         self.critic_optimizer.step()
-        self.speaker_decoder_optimizer.step()
+        self.aux_optimizer.step()
 
     def test_train_optim_step(self):
         self.loss.backward()
@@ -858,7 +878,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder_optimizer.zero_grad()
             self.decoder_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
-            self.speaker_decoder_optimizer.zero_grad()
+            self.aux_optimizer.zero_grad()
 
             self.loss = 0
             if feedback == 'teacher':
@@ -881,7 +901,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder_optimizer.step()
             self.decoder_optimizer.step()
             self.critic_optimizer.step()
-            self.speaker_decoder_optimizer.step()
+            self.aux_optimizer.step()
 
     def save(self, epoch, path):
         ''' Snapshot models '''
@@ -897,7 +917,9 @@ class Seq2SeqAgent(BaseAgent):
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
                      ("critic", self.critic, self.critic_optimizer),
-                     ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
+                     ("speaker_decoder", self.speaker_decoder, self.aux_optimizer),
+                     ("progress_indicator", self.progress_indicator, self.aux_optimizer),
+                     ("matching_network", self.matching_network, self.aux_optimizer)
                      ]
         for param in all_tuple:
             create_state(*param)
@@ -919,7 +941,9 @@ class Seq2SeqAgent(BaseAgent):
         all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
                      ("decoder", self.decoder, self.decoder_optimizer),
                      ("critic", self.critic, self.critic_optimizer),
-                     ("speaker_decoder", self.speaker_decoder, self.speaker_decoder_optimizer)
+                     ("speaker_decoder", self.speaker_decoder, self.aux_optimizer),
+                     ("progress_indicator", self.progress_indicator, self.aux_optimizer),
+                     ("matching_network", self.matching_network, self.aux_optimizer)
                      ]
         for param in all_tuple:
             recover_state(*param)
