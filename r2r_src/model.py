@@ -190,6 +190,20 @@ class AttnDecoderLSTM(nn.Module):
 
         return h_1, c_1, logit, h_tilde
 
+class ProgressIndicator(nn.Module):
+    def __init__(self):
+        super(ProgressIndicator, self).__init__()
+        hidden_size = args.rnn_dim
+        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(hidden_size, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, h):
+        h = self.relu1(self.fc1(h))
+        h = self.sigmoid(self.fc2(h))
+        # sigmoid
+        return h
 
 class Critic(nn.Module):
     def __init__(self):

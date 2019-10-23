@@ -112,8 +112,10 @@ class Seq2SeqAgent(BaseAgent):
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.speaker_decoder = model.SpeakerDecoder(self.tok.vocab_size(), args.wemb, self.tok.word_to_index['<PAD>'], args.rnn_dim, args.dropout).cuda()
         self.critic = model.Critic().cuda()
+        self.progress_indicator = model.ProgressIndicator().cuda()
         self.models = (self.encoder, self.decoder, self.critic, self.speaker_decoder)
         self.softmax_loss = torch.nn.CrossEntropyLoss(ignore_index=self.tok.word_to_index['<PAD>'])
+        self.bce_loss = nn.BCELoss()
 
         # Optimizers
         self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
@@ -464,7 +466,7 @@ class Seq2SeqAgent(BaseAgent):
             self.loss += ml_loss * train_ml / batch_size
 
         # auxiliary tasks
-        # speaker recover loss
+        # aux #1: speaker recover loss
         h_t = h_t.unsqueeze(0)
         c_t = c_t.unsqueeze(0)
         insts = utils.gt_words(perm_obs)
@@ -482,6 +484,16 @@ class Seq2SeqAgent(BaseAgent):
         aux_loss = aux_loss*args.aux_speaker_weight
         self.loss+=aux_loss
         self.logs['aux_loss'].append(aux_loss.detach())
+
+        # aux #2: progress indicator
+        prob = self.progress_indicator(decode_ctx)
+        progress_label = utils.progress_generator(decode_mask)
+        aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
+        self.loss += aux_loss2*args.aux_progress_weight
+
+        # aux #3: inst matching
+
+
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)

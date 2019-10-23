@@ -79,6 +79,7 @@ class Param:
 
         # aux loss
         self.parser.add_argument('--aux_speaker_weight', type=float, default=0.5)
+        self.parser.add_argument('--aux_progress_weight', type=float, default=2)
         self.parser.add_argument('--test_train_num', type=int, default=3)
         self.parser.add_argument('--tt_lr', type=float, default=1e-4)
 
