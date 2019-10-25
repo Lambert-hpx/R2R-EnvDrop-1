@@ -99,6 +99,8 @@ class Seq2SeqAgent(BaseAgent):
       '<ignore>': (0, 0, 0)  # <ignore>
     }
 
+
+
     def __init__(self, env, results_path, tok, episode_len=20):
         super(Seq2SeqAgent, self).__init__(env, results_path)
         self.tok = tok
@@ -111,15 +113,18 @@ class Seq2SeqAgent(BaseAgent):
                                          args.dropout, bidirectional=args.bidir).cuda()
         self.decoder = model.AttnDecoderLSTM(args.aemb, args.rnn_dim, args.dropout, feature_size=self.feature_size + args.angle_feat_size).cuda()
         self.speaker_decoder = model.SpeakerDecoder(self.tok.vocab_size(), args.wemb, self.tok.word_to_index['<PAD>'], args.rnn_dim, args.dropout).cuda()
-        states = torch.load("snap/agent_repro/state_dict/best_val_unseen")
-        self.speaker_decoder.load_state_dict(states)
+        states = torch.load("snap.1.0/speaker/state_dict/best_val_unseen_bleu")
+        self.speaker_decoder.load_state_dict(states["decoder"]["state_dict"])
         self.critic = model.Critic().cuda()
         self.progress_indicator = model.ProgressIndicator().cuda()
         self.matching_network = model.MatchingNetwork().cuda()
+        self.feature_predictor = model.FeaturePredictor().cuda()
+        self.angle_predictor = model.AnglePredictor().cuda()
         self.models = (self.encoder, self.decoder, self.critic)
         self.aux_models = (self.speaker_decoder, self.progress_indicator, self.matching_network)
         self.softmax_loss = torch.nn.CrossEntropyLoss(ignore_index=self.tok.word_to_index['<PAD>'])
-        self.bce_loss = nn.BCELoss()
+        self.bce_loss = nn.BCELoss().cuda()
+        self.mse_loss = nn.MSELoss().cuda()
 
         # Optimizers
         self.encoder_optimizer = args.optimizer(self.encoder.parameters(), lr=args.lr)
@@ -127,9 +132,24 @@ class Seq2SeqAgent(BaseAgent):
         self.decoder_optimizer = args.optimizer(self.decoder.parameters(), lr=args.lr)
         self.decoder_optimizer1 = args.optimizer(self.decoder.parameters(), lr=args.tt_lr)
         self.critic_optimizer = args.optimizer(self.critic.parameters(), lr=args.lr)
-        self.aux_optimizer = args.optimizer(list(self.speaker_decoder.parameters()) + list(self.progress_indicator.parameters()) + list(self.matching_network.parameters()), lr=args.lr)
-        self.aux_optimizer1 = args.optimizer(self.speaker_decoder.parameters(), lr=args.tt_lr)
+        self.aux_optimizer = args.optimizer(
+                list(self.speaker_decoder.parameters())
+                + list(self.progress_indicator.parameters())
+                + list(self.matching_network.parameters())
+                + list(self.feature_predictor.parameters())
+                + list(self.angle_predictor.parameters()), lr=args.lr)
         self.optimizers = (self.encoder_optimizer, self.decoder_optimizer, self.critic_optimizer)
+
+        self.all_tuple = [
+            ("encoder", self.encoder, self.encoder_optimizer),
+            ("decoder", self.decoder, self.decoder_optimizer),
+            ("critic", self.critic, self.critic_optimizer),
+            ("speaker_decoder", self.speaker_decoder, self.aux_optimizer),
+            ("progress_indicator", self.progress_indicator, self.aux_optimizer),
+            ("matching_network", self.matching_network, self.aux_optimizer),
+            ("feature_predictor", self.feature_predictor, self.aux_optimizer),
+            ("angle_predictor", self.feature_predictor, self.aux_optimizer)
+        ]
 
         # Evaluations
         self.losses = []
@@ -317,8 +337,11 @@ class Seq2SeqAgent(BaseAgent):
         entropys = []
         ml_loss = 0.
 
-        decode_ctx = []
+        v_ctx = [] # ctx before language att
+        vl_ctx = [] # ctx after language att
         h1 = h_t
+        aux_loss4 = 0
+        aux_loss5 = 0
         for t in range(self.episode_len):
 
             input_a_t, f_t, candidate_feat, candidate_leng = self.get_input_feat(perm_obs)
@@ -330,7 +353,8 @@ class Seq2SeqAgent(BaseAgent):
                                                h_t, h1, c_t,
                                                ctx, ctx_mask,
                                                already_dropfeat=(speaker is not None))
-            decode_ctx.append(h1)
+            v_ctx.append(h_t)
+            vl_ctx.append(h1)
 
             hidden_states.append(h_t)
 
@@ -348,6 +372,21 @@ class Seq2SeqAgent(BaseAgent):
             # Supervised training
             target = self._teacher_action(perm_obs, ended)
             ml_loss += self.criterion(logit, target)
+
+            mask = target == -100
+            target_aux = target.clone()
+            target_aux[mask] = 0
+            target_aux = target_aux.unsqueeze(1).unsqueeze(2)
+            target_aux = target_aux.expand(-1, 1, candidate_feat.size(2))
+            selected_feat = torch.gather(candidate_feat, 1, target_aux)
+            selected_feat = selected_feat.squeeze() # batch_size, feat_size
+            selected_feat[mask] = 0
+            feature_label = selected_feat[:, :-args.angle_feat_size]
+            angle_label = selected_feat[:, -4:]
+            feature_pred = self.feature_predictor(h1)
+            angle_pred = self.angle_predictor(h1)
+            aux_loss4 += self.mse_loss(feature_pred, feature_label)
+            aux_loss5 += self.mse_loss(angle_pred, angle_label)
 
             # Determine next model inputs
             if self.feedback == 'teacher':
@@ -470,14 +509,15 @@ class Seq2SeqAgent(BaseAgent):
             self.loss += ml_loss * train_ml / batch_size
 
         # auxiliary tasks
-        # aux #1: speaker recover loss
         h_t = h_t.unsqueeze(0)
         c_t = c_t.unsqueeze(0)
         insts = utils.gt_words(perm_obs)
-        decode_ctx = torch.stack(decode_ctx, dim=1)
+        v_ctx = torch.stack(v_ctx, dim=1)
+        vl_ctx = torch.stack(vl_ctx, dim=1)
+        # aux #1: speaker recover loss
         decode_mask = [torch.tensor(mask) for mask in masks]
         decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
-        logits, _, _ = self.speaker_decoder(insts, decode_ctx, decode_mask, h_t, c_t)
+        logits, _, _ = self.speaker_decoder(insts, v_ctx, decode_mask, h_t, c_t)
         # Because the softmax_loss only allow dim-1 to be logit,
         # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
         logits = logits.permute(0, 2, 1).contiguous()
@@ -490,7 +530,7 @@ class Seq2SeqAgent(BaseAgent):
         self.logs['aux_loss'].append(aux_loss.detach())
 
         # aux #2: progress indicator
-        prob = self.progress_indicator(decode_ctx)
+        prob = self.progress_indicator(vl_ctx)
         progress_label = utils.progress_generator(decode_mask)
         aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
         aux_loss2 = aux_loss2*args.aux_progress_weight
@@ -498,7 +538,7 @@ class Seq2SeqAgent(BaseAgent):
         self.logs['aux_loss2'].append(aux_loss2.detach())
 
         # aux #3: inst matching
-        h1 = decode_ctx[:,-1,:]
+        h1 = v_ctx[:,-1,:]
         batch_size = h1.shape[0]
         perm_idx = torch.randperm(batch_size)
         order_idx = torch.arange(0, batch_size)
@@ -511,6 +551,16 @@ class Seq2SeqAgent(BaseAgent):
         aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
         self.loss += aux_loss3
         self.logs['aux_loss3'].append(aux_loss3.detach())
+
+        # aux #4: feature prediction
+        aux_loss4 = aux_loss4 * args.aux_feature_weight
+        self.loss += aux_loss4
+        self.logs['aux_loss4'].append(aux_loss4.detach())
+
+        # aux #5: angle prediction
+        aux_loss5 = aux_loss5 * args.aux_angle_weight
+        self.loss += aux_loss5
+        self.logs['aux_loss5'].append(aux_loss5.detach())
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
@@ -903,6 +953,8 @@ class Seq2SeqAgent(BaseAgent):
             self.critic_optimizer.step()
             self.aux_optimizer.step()
 
+
+
     def save(self, epoch, path):
         ''' Snapshot models '''
         the_dir, _ = os.path.split(path)
@@ -914,14 +966,8 @@ class Seq2SeqAgent(BaseAgent):
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
             }
-        all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
-                     ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer),
-                     ("speaker_decoder", self.speaker_decoder, self.aux_optimizer),
-                     ("progress_indicator", self.progress_indicator, self.aux_optimizer),
-                     ("matching_network", self.matching_network, self.aux_optimizer)
-                     ]
-        for param in all_tuple:
+
+        for param in self.all_tuple:
             create_state(*param)
         torch.save(states, path)
 
@@ -938,14 +984,7 @@ class Seq2SeqAgent(BaseAgent):
             model.load_state_dict(state)
             if args.loadOptim:
                 optimizer.load_state_dict(states[name]['optimizer'])
-        all_tuple = [("encoder", self.encoder, self.encoder_optimizer),
-                     ("decoder", self.decoder, self.decoder_optimizer),
-                     ("critic", self.critic, self.critic_optimizer),
-                     ("speaker_decoder", self.speaker_decoder, self.aux_optimizer),
-                     ("progress_indicator", self.progress_indicator, self.aux_optimizer),
-                     ("matching_network", self.matching_network, self.aux_optimizer)
-                     ]
-        for param in all_tuple:
+        for param in self.all_tuple:
             recover_state(*param)
         return states['encoder']['epoch'] - 1
 

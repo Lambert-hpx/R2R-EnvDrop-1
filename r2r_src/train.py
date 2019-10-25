@@ -120,6 +120,9 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
     best_val = {'val_seen': {"accu": 0., "state":"", 'update':False},
                 'val_unseen': {"accu": 0., "state":"", 'update':False}}
 
+    listner.save(0, os.path.join("snap", args.name, "state_dict", "best_%s" % ("val_seen")))
+    listner.load(os.path.join("snap", args.name, "state_dict", "best_%s" % ("val_seen")))
+
     if args.fast_train:
         log_every = 40
     for idx in range(start_iter, start_iter+n_iters, log_every):
@@ -165,6 +168,8 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
         aux_loss1 = sum(listner.logs['aux_loss']) / total
         aux_loss2 = sum(listner.logs['aux_loss2']) / total
         aux_loss3 = sum(listner.logs['aux_loss3']) / total
+        aux_loss4 = sum(listner.logs['aux_loss4']) / total
+        aux_loss5 = sum(listner.logs['aux_loss5']) / total
         entropy = sum(listner.logs['entropy']) / total #/ length / args.batchSize
         predict_loss = sum(listner.logs['us_loss']) / max(len(listner.logs['us_loss']), 1)
 
@@ -172,6 +177,8 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
         writer.add_scalar("loss/aux1", aux_loss1, idx)
         writer.add_scalar("loss/aux2", aux_loss2, idx)
         writer.add_scalar("loss/aux3", aux_loss3, idx)
+        writer.add_scalar("loss/aux4", aux_loss4, idx)
+        writer.add_scalar("loss/aux5", aux_loss5, idx)
         writer.add_scalar("policy_entropy", entropy, idx)
         writer.add_scalar("loss/unsupervised", predict_loss, idx)
         writer.add_scalar("total_actions", total, idx)

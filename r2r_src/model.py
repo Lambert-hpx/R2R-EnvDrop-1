@@ -205,6 +205,33 @@ class MatchingNetwork(nn.Module):
         # sigmoid
         return h
 
+class FeaturePredictor(nn.Module):
+    def __init__(self):
+        super(FeaturePredictor, self).__init__()
+        hidden_size = args.rnn_dim
+        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(hidden_size, args.feature_size)
+
+    def forward(self, h):
+        h = self.relu1(self.fc1(h))
+        h = self.fc2(h)
+        return h
+
+class AnglePredictor(nn.Module):
+    def __init__(self):
+        super(AnglePredictor, self).__init__()
+        hidden_size = args.rnn_dim
+        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.relu1 = nn.LeakyReLU()
+        self.fc2 = nn.Linear(hidden_size, 4)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, h):
+        h = self.relu1(self.fc1(h))
+        h = self.sigmoid(self.fc2(h))
+        return h
+
 class ProgressIndicator(nn.Module):
     def __init__(self):
         super(ProgressIndicator, self).__init__()
@@ -217,7 +244,6 @@ class ProgressIndicator(nn.Module):
     def forward(self, h):
         h = self.relu1(self.fc1(h))
         h = self.sigmoid(self.fc2(h))
-        # sigmoid
         return h
 
 class Critic(nn.Module):
