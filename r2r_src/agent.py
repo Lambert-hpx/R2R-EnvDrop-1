@@ -516,7 +516,7 @@ class Seq2SeqAgent(BaseAgent):
         vl_ctx = torch.stack(vl_ctx, dim=1)
         # aux #1: speaker recover loss
         eps = 1e-6
-        if abs(args.aux_speaker_weight - 0) < eps:
+        if abs(args.aux_speaker_weight - 0) > eps:
             decode_mask = [torch.tensor(mask) for mask in masks]
             decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
             logits, _, _ = self.speaker_decoder(insts, v_ctx, decode_mask, h_t, c_t)
@@ -534,7 +534,7 @@ class Seq2SeqAgent(BaseAgent):
             self.logs['aux_loss'].append(0)
 
         # aux #2: progress indicator
-        if abs(args.aux_progress_weight - 0) < eps:
+        if abs(args.aux_progress_weight - 0) > eps:
             prob = self.progress_indicator(vl_ctx)
             progress_label = utils.progress_generator(decode_mask)
             aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
@@ -545,7 +545,7 @@ class Seq2SeqAgent(BaseAgent):
             self.logs['aux_loss2'].append(0)
 
         # aux #3: inst matching
-        if abs(args.aux_matching_weight - 0) < eps:
+        if abs(args.aux_matching_weight - 0) > eps:
             h1 = v_ctx[:,-1,:]
             # h1 = v_ctx
             batch_size = h1.shape[0]
