@@ -120,9 +120,6 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
     best_val = {'val_seen': {"accu": 0., "state":"", 'update':False},
                 'val_unseen': {"accu": 0., "state":"", 'update':False}}
 
-    listner.save(0, os.path.join("snap", args.name, "state_dict", "best_%s" % ("val_seen")))
-    listner.load(os.path.join("snap", args.name, "state_dict", "best_%s" % ("val_seen")))
-
     if args.fast_train:
         log_every = 40
     for idx in range(start_iter, start_iter+n_iters, log_every):

@@ -202,7 +202,7 @@ class MatchingNetwork(nn.Module):
     def forward(self, h):
         h = self.relu1(self.fc1(h))
         h = self.sigmoid(self.fc2(h))
-        # sigmoid
+        # h = torch.mean(h, dim=1) # pooling, harm performance
         return h
 
 class FeaturePredictor(nn.Module):

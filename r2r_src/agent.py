@@ -515,42 +515,53 @@ class Seq2SeqAgent(BaseAgent):
         v_ctx = torch.stack(v_ctx, dim=1)
         vl_ctx = torch.stack(vl_ctx, dim=1)
         # aux #1: speaker recover loss
-        decode_mask = [torch.tensor(mask) for mask in masks]
-        decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
-        logits, _, _ = self.speaker_decoder(insts, v_ctx, decode_mask, h_t, c_t)
-        # Because the softmax_loss only allow dim-1 to be logit,
-        # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
-        logits = logits.permute(0, 2, 1).contiguous()
-        aux_loss = self.softmax_loss(
-            input  = logits[:, :, :-1],         # -1 for aligning
-            target = insts[:, 1:]               # "1:" to ignore the word <BOS>
-        )
-        aux_loss = aux_loss*args.aux_speaker_weight
-        self.loss+=aux_loss
-        self.logs['aux_loss'].append(aux_loss.detach())
+        eps = 1e-6
+        if abs(args.aux_speaker_weight - 0) < eps:
+            decode_mask = [torch.tensor(mask) for mask in masks]
+            decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
+            logits, _, _ = self.speaker_decoder(insts, v_ctx, decode_mask, h_t, c_t)
+            # Because the softmax_loss only allow dim-1 to be logit,
+            # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
+            logits = logits.permute(0, 2, 1).contiguous()
+            aux_loss = self.softmax_loss(
+                input  = logits[:, :, :-1],         # -1 for aligning
+                target = insts[:, 1:]               # "1:" to ignore the word <BOS>
+            )
+            aux_loss = aux_loss*args.aux_speaker_weight
+            self.loss+=aux_loss
+            self.logs['aux_loss'].append(aux_loss.detach())
+        else:
+            self.logs['aux_loss'].append(0)
 
         # aux #2: progress indicator
-        prob = self.progress_indicator(vl_ctx)
-        progress_label = utils.progress_generator(decode_mask)
-        aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
-        aux_loss2 = aux_loss2*args.aux_progress_weight
-        self.loss += aux_loss2
-        self.logs['aux_loss2'].append(aux_loss2.detach())
+        if abs(args.aux_progress_weight - 0) < eps:
+            prob = self.progress_indicator(vl_ctx)
+            progress_label = utils.progress_generator(decode_mask)
+            aux_loss2 = self.bce_loss(prob.squeeze(), progress_label)
+            aux_loss2 = aux_loss2*args.aux_progress_weight
+            self.loss += aux_loss2
+            self.logs['aux_loss2'].append(aux_loss2.detach())
+        else:
+            self.logs['aux_loss2'].append(0)
 
         # aux #3: inst matching
-        h1 = v_ctx[:,-1,:]
-        batch_size = h1.shape[0]
-        perm_idx = torch.randperm(batch_size)
-        order_idx = torch.arange(0, batch_size)
-        perm_h1 = h1[perm_idx,:]
-        matching_mask = torch.empty(batch_size).random_(2).bool()
-        same_idx = perm_idx == order_idx
-        label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
-        new_h1 = label * h1 + (1-label) * h1[perm_idx,:]
-        prob = self.matching_network(new_h1)
-        aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
-        self.loss += aux_loss3
-        self.logs['aux_loss3'].append(aux_loss3.detach())
+        if abs(args.aux_matching_weight - 0) < eps:
+            h1 = v_ctx[:,-1,:]
+            # h1 = v_ctx
+            batch_size = h1.shape[0]
+            rand_idx = torch.randperm(batch_size)
+            order_idx = torch.arange(0, batch_size)
+            perm_h1 = h1[rand_idx,:]
+            matching_mask = torch.empty(batch_size).random_(2).bool()
+            same_idx = rand_idx == order_idx
+            label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
+            new_h1 = label * h1 + (1-label) * h1[rand_idx,:]
+            prob = self.matching_network(new_h1)
+            aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
+            self.loss += aux_loss3
+            self.logs['aux_loss3'].append(aux_loss3.detach())
+        else:
+            self.logs['aux_loss3'].append(0)
 
         # aux #4: feature prediction
         aux_loss4 = aux_loss4 * args.aux_feature_weight
