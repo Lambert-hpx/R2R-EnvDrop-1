@@ -240,11 +240,14 @@ def valid(train_env, tok, val_envs={}):
         result = agent.get_results()
 
         if env_name != '':
+            loss_str1 = "%s" % env_name
             score_summary, _ = evaluator.score(result)
             loss_str = "Env name: %s" % env_name
             for metric,val in score_summary.items():
                 loss_str += ', %s: %.4f' % (metric, val)
+                loss_str1 += " %.4f" % val
             print(loss_str)
+            print(loss_str1)
 
         if args.submit:
             json.dump(
