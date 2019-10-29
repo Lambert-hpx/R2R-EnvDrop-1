@@ -50,6 +50,7 @@ class BaseAgent(object):
         return globals()[name+"Agent"]
 
     def test(self, iters=None, **kwargs):
+        import pdb; pdb.set_trace()
         self.env.reset_epoch(shuffle=(iters is not None))   # If iters is not none, shuffle the env batch
         self.losses = []
         self.results = {}
@@ -64,18 +65,7 @@ class BaseAgent(object):
                     self.results[traj['instr_id']] = traj['path']
         else:   # Do a full round
             while True:
-                for i in range(args.test_train_num):
-                    self.zero_grad()
-                    if i == 0:
-                        self.rollout(**kwargs)
-                    else:
-                        self.rollout(test_train=True, **kwargs)
-                    # self.test_train_optim_step()
-
-                self.encoder.eval()
-                self.decoder.eval()
-                self.critic.eval()
-                for traj in self.rollout(test_train=True, **kwargs):
+                for traj in self.rollout(**kwargs):
                     if traj['instr_id'] in self.results:
                         looped = True
                     else:
@@ -578,6 +568,7 @@ class Seq2SeqAgent(BaseAgent):
         else:
             self.losses.append(self.loss.item() / self.episode_len)    # This argument is useless.
 
+        import pdb; pdb.set_trace()
         return traj
 
     def _dijkstra(self):
@@ -888,9 +879,6 @@ class Seq2SeqAgent(BaseAgent):
         for model, optimizer in zip(self.models, self.optimizers):
             model.train()
             optimizer.zero_grad()
-        for model in self.aux_models:
-            model.train()
-        self.aux_optimizer.zero_grad()
 
     def accumulate_gradient(self, feedback='teacher', **kwargs):
         if feedback == 'teacher':
@@ -963,8 +951,6 @@ class Seq2SeqAgent(BaseAgent):
             self.decoder_optimizer.step()
             self.critic_optimizer.step()
             self.aux_optimizer.step()
-
-
 
     def save(self, epoch, path):
         ''' Snapshot models '''

@@ -195,6 +195,7 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
             # Get validation distance from goal under test evaluation conditions
             listner.test(use_dropout=False, feedback='argmax', iters=iters)
             result = listner.get_results()
+            import pdb; pdb.set_trace()
             score_summary, _ = evaluator.score(result)
             loss_str += ", %s " % env_name
             for metric,val in score_summary.items():
@@ -232,6 +233,7 @@ def valid(train_env, tok, val_envs={}):
     print("Loaded the listener model at iter %d from %s" % (agent.load(args.load), args.load))
 
     for env_name, (env, evaluator) in val_envs.items():
+        import pdb; pdb.set_trace()
         agent.logs = defaultdict(list)
         agent.env = env
 
