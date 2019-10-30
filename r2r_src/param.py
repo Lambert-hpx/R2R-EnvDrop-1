@@ -27,8 +27,7 @@ class Param:
         self.parser.add_argument("--load", type=str, default=None)
 
         # More Paths from
-        self.parser.add_argument("--aug1", default=None)
-        self.parser.add_argument("--aug2", default=None)
+        self.parser.add_argument("--aug", default=None)
 
         # Listener Model Config
         self.parser.add_argument("--zeroInit", dest='zero_init', action='store_const', default=False, const=True)
@@ -86,6 +85,8 @@ class Param:
         self.parser.add_argument('--aux_angle_weight', type=float, default=0)
         self.parser.add_argument('--test_train_num', type=int, default=3)
         self.parser.add_argument('--tt_lr', type=float, default=1e-4)
+        self.parser.add_argument('--fix_aux_func', action="store_const", default=False, const=True)
+
 
         # A2C
         self.parser.add_argument("--gamma", default=0.9, type=float)

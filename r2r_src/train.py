@@ -468,14 +468,13 @@ def train_val_augment():
     featurized_scans = set([key.split("_")[0] for key in list(feat_dict.keys())])
 
     # Load the augmentation data
-    aug_path1 = args.aug1
-    aug_path2 = args.aug2
+    aug_path = args.aug
 
     # Create the training environment
     train_env = R2RBatch(feat_dict, batch_size=args.batchSize,
                          splits=['train'], tokenizer=tok)
     aug_env   = R2RBatch(feat_dict, batch_size=args.batchSize,
-                         splits=[aug_path1, aug_path2], tokenizer=tok, name='aug')
+                         splits=[aug_path], tokenizer=tok, name='aug')
 
     # Printing out the statistics of the dataset
     stats = train_env.get_statistics()

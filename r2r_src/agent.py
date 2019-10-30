@@ -878,6 +878,10 @@ class Seq2SeqAgent(BaseAgent):
             model.train()
             optimizer.zero_grad()
 
+        for model in self.aux_models:
+            model.train()
+        self.aux_optimizer.zero_grad()
+
     def accumulate_gradient(self, feedback='teacher', **kwargs):
         if feedback == 'teacher':
             self.feedback = 'teacher'
