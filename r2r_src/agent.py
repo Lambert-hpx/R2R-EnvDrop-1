@@ -50,7 +50,6 @@ class BaseAgent(object):
         return globals()[name+"Agent"]
 
     def test(self, iters=None, **kwargs):
-        import pdb; pdb.set_trace()
         self.env.reset_epoch(shuffle=(iters is not None))   # If iters is not none, shuffle the env batch
         self.losses = []
         self.results = {}
@@ -568,7 +567,6 @@ class Seq2SeqAgent(BaseAgent):
         else:
             self.losses.append(self.loss.item() / self.episode_len)    # This argument is useless.
 
-        import pdb; pdb.set_trace()
         return traj
 
     def _dijkstra(self):
