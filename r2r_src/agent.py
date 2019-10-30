@@ -64,7 +64,7 @@ class BaseAgent(object):
                     self.results[traj['instr_id']] = traj['path']
         else:   # Do a full round
             while True:
-                for traj in self.rollout(**kwargs):
+                for traj in self.rollout(test=True, **kwargs):
                     if traj['instr_id'] in self.results:
                         looped = True
                     else:
@@ -253,7 +253,7 @@ class Seq2SeqAgent(BaseAgent):
                        self.env.env.sims[idx].getState().navigableLocations[select_candidate['idx']].viewpointId
                 take_action(i, idx, select_candidate['idx'])
 
-    def rollout(self, train_ml=None, train_rl=True, reset=True, speaker=None, test_train=False):
+    def rollout(self, train_ml=None, train_rl=True, reset=True, speaker=None, test_train=False, test=False):
         """
         :param train_ml:    The weight to train with maximum likelihood
         :param train_rl:    whether use RL in training
@@ -350,7 +350,7 @@ class Seq2SeqAgent(BaseAgent):
             # Mask outputs where agent can't move forward
             # Here the logit is [b, max_candidate]
             candidate_mask = utils.length2mask(candidate_leng)
-            if args.submit:     # Avoding cyclic path
+            if args.submit or test==True:     # Avoding cyclic path
                 for ob_id, ob in enumerate(perm_obs):
                     visited[ob_id].add(ob['viewpoint'])
                     for c_id, c in enumerate(ob['candidate']):

@@ -27,7 +27,8 @@ class Param:
         self.parser.add_argument("--load", type=str, default=None)
 
         # More Paths from
-        self.parser.add_argument("--aug", default=None)
+        self.parser.add_argument("--aug1", default=None)
+        self.parser.add_argument("--aug2", default=None)
 
         # Listener Model Config
         self.parser.add_argument("--zeroInit", dest='zero_init', action='store_const', default=False, const=True)
