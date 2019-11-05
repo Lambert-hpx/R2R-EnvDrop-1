@@ -5,3 +5,11 @@
 /img_features
 run/
 tasks/R2R/data/
+snap.1.0/
+snap/
+r2r_src/vqa/
+r2r_src/pytorch-caffe/
+pytorch_pretrained_bert/
+build/
+check.py
+models

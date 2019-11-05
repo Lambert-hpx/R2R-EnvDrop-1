@@ -194,7 +194,7 @@ class MatchingNetwork(nn.Module):
     def __init__(self):
         super(MatchingNetwork, self).__init__()
         hidden_size = args.rnn_dim
-        self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.fc1 = nn.Linear(hidden_size*2, hidden_size)
         self.relu1 = nn.LeakyReLU()
         self.fc2 = nn.Linear(hidden_size, 1)
         self.sigmoid = nn.Sigmoid()
