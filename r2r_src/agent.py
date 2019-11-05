@@ -64,7 +64,7 @@ class BaseAgent(object):
                     self.results[traj['instr_id']] = traj['path']
         else:   # Do a full round
             while True:
-                for traj in self.rollout(test=True, **kwargs):
+                for traj in self.rollout(**kwargs):
                     if traj['instr_id'] in self.results:
                         looped = True
                     else:

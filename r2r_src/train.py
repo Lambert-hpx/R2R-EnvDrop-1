@@ -220,7 +220,7 @@ def train(train_env, tok, n_iters, log_every=100, val_envs={}, aug_env=None):
             for env_name in best_val:
                 print(env_name, best_val[env_name]['state'])
 
-        if iter % 50000 == 0:
+        if iter % 10000 == 0:
             listner.save(idx, os.path.join("snap", args.name, "state_dict", "Iter_%06d" % (iter)))
 
     listner.save(idx, os.path.join("snap", args.name, "state_dict", "LAST_iter%d" % (idx)))
