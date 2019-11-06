@@ -905,7 +905,7 @@ class Seq2SeqAgent(BaseAgent):
         self.encoder_optimizer.step()
         self.decoder_optimizer.step()
         self.critic_optimizer.step()
-        if args.fix_aux_func:
+        if not args.fix_aux_func:
             self.aux_optimizer.step()
 
     def test_train_optim_step(self):
@@ -955,7 +955,7 @@ class Seq2SeqAgent(BaseAgent):
             self.encoder_optimizer.step()
             self.decoder_optimizer.step()
             self.critic_optimizer.step()
-            if args.fix_aux_func:
+            if not args.fix_aux_func:
                 self.aux_optimizer.step()
 
     def save(self, epoch, path):
