@@ -503,11 +503,11 @@ class Seq2SeqAgent(BaseAgent):
         insts = utils.gt_words(perm_obs)
         v_ctx = torch.stack(v_ctx, dim=1)
         vl_ctx = torch.stack(vl_ctx, dim=1)
+        decode_mask = [torch.tensor(mask) for mask in masks]
+        decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
         # aux #1: speaker recover loss
         eps = 1e-6
         if abs(args.aux_speaker_weight - 0) > eps:
-            decode_mask = [torch.tensor(mask) for mask in masks]
-            decode_mask = (1-torch.stack(decode_mask, dim=1)).bool().cuda() # different definition about mask
             logits, _, _ = self.speaker_decoder(insts, v_ctx, decode_mask, h_t, c_t)
             # Because the softmax_loss only allow dim-1 to be logit,
             # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
