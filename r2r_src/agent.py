@@ -56,6 +56,8 @@ class BaseAgent(object):
         # We rely on env showing the entire batch before repeating anything
         looped = False
         self.loss = 0
+        self.acc=0
+        self.acc_num = 0
         if iters is not None:
             # For each time, it will run the first 'iters' iterations. (It was shuffled before)
             for i in range(iters):
@@ -72,6 +74,7 @@ class BaseAgent(object):
                         self.results[traj['instr_id']] = traj['path']
                 if looped:
                     break
+        print("acc", self.acc/self.acc_num)
 
 class Seq2SeqAgent(BaseAgent):
     ''' An agent based on an LSTM seq2seq model with attention. '''
@@ -512,6 +515,11 @@ class Seq2SeqAgent(BaseAgent):
             # Because the softmax_loss only allow dim-1 to be logit,
             # So permute the output (batch_size, length, logit) --> (batch_size, logit, length)
             logits = logits.permute(0, 2, 1).contiguous()
+            correct_num = torch.sum((insts[:, 1:] == torch.argmax(logits[:, :, :-1], dim=1)))\
+                .cpu().numpy()
+            all_num = insts.size(0)*(insts.size(1)-1)
+            self.acc+=correct_num/all_num
+            self.acc_num+=1
             aux_loss = self.softmax_loss(
                 input  = logits[:, :, :-1],         # -1 for aligning
                 target = insts[:, 1:]               # "1:" to ignore the word <BOS>
