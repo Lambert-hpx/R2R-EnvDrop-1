@@ -545,7 +545,7 @@ class Seq2SeqAgent(BaseAgent):
             same_idx = rand_idx == order_idx
             label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
             new_h1 = label * h1 + (1-label) * h1[rand_idx,:]
-            mean_ctx = torch.mean(ctx, dim=1)
+            mean_ctx = torch.mean(ctx.detach(), dim=1)
             vl_pair = torch.cat((new_h1, mean_ctx), dim=1)
             prob = self.matching_network(vl_pair)
             aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
