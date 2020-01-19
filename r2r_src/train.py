@@ -230,8 +230,11 @@ def valid(train_env, tok, val_envs={}):
     agent = Seq2SeqAgent(train_env, "", tok, args.maxAction)
 
     print("Loaded the listener model at iter %d from %s" % (agent.load(args.load), args.load))
-
+    cnt = 0
     for env_name, (env, evaluator) in val_envs.items():
+        if cnt < 2:
+            cnt += 1
+            continue
         agent.logs = defaultdict(list)
         agent.env = env
 
@@ -248,7 +251,7 @@ def valid(train_env, tok, val_envs={}):
                 loss_str1 += " %.4f" % val
             print(loss_str)
             print(loss_str1)
-
+        break
         if args.submit:
             json.dump(
                 result,

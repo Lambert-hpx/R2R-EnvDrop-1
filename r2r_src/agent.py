@@ -371,13 +371,14 @@ class Seq2SeqAgent(BaseAgent):
             target_aux = target_aux.unsqueeze(1).unsqueeze(2)
             target_aux = target_aux.expand(-1, 1, candidate_feat.size(2))
             selected_feat = torch.gather(candidate_feat, 1, target_aux)
-            selected_feat = selected_feat.squeeze() # batch_size, feat_size
+            selected_feat = selected_feat.squeeze(1) # batch_size, feat_size
             selected_feat[mask] = 0
             feature_label = selected_feat[:, :-args.angle_feat_size]
             angle_label = selected_feat[:, -4:]
             feature_pred = self.feature_predictor(h1)
             angle_pred = self.angle_predictor(h1)
             aux_loss4 += self.mse_loss(feature_pred, feature_label)
+            print("angle", angle_pred)
             aux_loss5 += self.mse_loss(angle_pred, angle_label)
 
             # Determine next model inputs
@@ -543,22 +544,24 @@ class Seq2SeqAgent(BaseAgent):
 
         # aux #3: inst matching
         if abs(args.aux_matching_weight - 0) > eps:
-            h1 = v_ctx[:,-1,:]
-            # h1 = v_ctx
-            batch_size = h1.shape[0]
-            rand_idx = torch.randperm(batch_size)
-            order_idx = torch.arange(0, batch_size)
-            perm_h1 = h1[rand_idx,:]
-            matching_mask = torch.empty(batch_size).random_(2).bool()
-            same_idx = rand_idx == order_idx
-            label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
-            new_h1 = label * h1 + (1-label) * h1[rand_idx,:]
-            mean_ctx = torch.mean(ctx.detach(), dim=1)
-            vl_pair = torch.cat((new_h1, mean_ctx), dim=1)
-            prob = self.matching_network(vl_pair)
-            aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
-            self.loss += aux_loss3
-            self.logs['aux_loss3'].append(aux_loss3.detach())
+            for i in range(v_ctx.size(1)):
+                h1 = v_ctx[:,i,:]
+                # h1 = v_ctx
+                batch_size = h1.shape[0]
+                rand_idx = torch.randperm(batch_size)
+                order_idx = torch.arange(0, batch_size)
+                perm_h1 = h1[rand_idx,:]
+                matching_mask = torch.empty(batch_size).random_(2).bool()
+                same_idx = rand_idx == order_idx
+                label = (matching_mask | same_idx).float().unsqueeze(1).cuda() # 1 same, 0 different
+                new_h1 = label * h1 + (1-label) * h1[rand_idx,:]
+                mean_ctx = torch.mean(ctx.detach(), dim=1)
+                vl_pair = torch.cat((new_h1, mean_ctx), dim=1)
+                prob = self.matching_network(vl_pair)
+                print(prob)
+                aux_loss3 = self.bce_loss(prob, label) * args.aux_matching_weight
+                self.loss += aux_loss3
+                self.logs['aux_loss3'].append(aux_loss3.detach())
         else:
             self.logs['aux_loss3'].append(0)
 
